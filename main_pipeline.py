@@ -10,10 +10,9 @@ from dotenv import load_dotenv
 from typing import Literal, Dict, Any, Tuple
 import time
 
-# --- Import Custom Modules ---
+# NOTE: Ensure these imports point to your custom files
 from retrival_util import get_semantic_context_for_query 
 from vector_ingestion_util import ingest_to_vector_db 
-
 
 # Load environment variables first
 load_dotenv()
@@ -28,12 +27,8 @@ class Config:
     LLM_API_VERSION = os.getenv("azureOpenAIApiVersion", "2024-08-01-preview")
     LLM_MODEL_NAME = "gpt-4o"
 
-    # File Paths
-    # NOTE: We use the Excel file for ingestion (stable) and Parquet for DuckDB (fast)
     INPUT_FILE_PATH = '../sheets/loan.xlsx' 
     PARQUET_OUTPUT_DIR = '../data/'
-    
-    # Global state variable for the Parquet path used by the LLM
     PARQUET_FILE_PATH = "" 
 
     @staticmethod
@@ -109,8 +104,6 @@ def execute_duckdb_query(query: str) -> pd.DataFrame:
     """Executes a SQL query against the local Parquet file using DuckDB."""
     try:
         conn = duckdb.connect()
-        # Ensure the query uses the correct dynamic Parquet path
-        # Note: The LLM prompt is designed to already include this, this is a final check.
         result_df = conn.execute(query).fetchdf()
         conn.close()
         return result_df
@@ -123,19 +116,32 @@ def execute_duckdb_query(query: str) -> pd.DataFrame:
 # 3. LLM ROUTER & CORE RAG FUNCTION
 # -------------------------------------------------------------
 
-def route_query_intent(llm_client: AzureOpenAI, user_question: str) -> Literal['SEMANTIC_SEARCH', 'SQL_QUERY']:
-    """Uses the LLM to classify the user's question intent."""
+def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame) -> Literal['SEMANTIC_SEARCH', 'SQL_QUERY']:
+    """
+    Uses the LLM to classify the user's question intent based on schema and sample data.
+    """
     if not llm_client: return 'SQL_QUERY'
 
-    ROUTER_SYSTEM_PROMPT = """
-        You are an intelligent routing agent. Classify the user's question into one of two intents.
+    # The Router Prompt now includes the data context
+    ROUTER_SYSTEM_PROMPT = f"""
+        You are an intelligent routing agent. Your task is to classify the user's question based on the provided database context.
 
-        1. **SEMANTIC_SEARCH** if the query involves: fuzzy matching, names, misspellings, or conceptual searches.
-        2. **SQL_QUERY** if the query involves: direct aggregation (sum, average), counting, or precise filtering on numerical/structured fields.
+        --- DATABASE CONTEXT ---
         
+        SCHEMA:
+        {schema}
+        
+        SAMPLE DATA (Top 5 Rows):
+        {df_sample.to_markdown(index=False)}
+        
+        --- CLASSIFICATION RULES ---
+        
+        1. **SEMANTIC_SEARCH**: Choose this intent if the query involves: fuzzy matching, potentially misspelled names (like 'Smithe'), or conceptual descriptions that require vector similarity (like 'high value collateral'). This path needs context retrieval (RAG).
+        
+        2. **SQL_QUERY**: Choose this intent if the query involves: direct calculations, aggregation functions (SUM, AVG, COUNT, MIN, MAX), or precise filtering on structured numeric or categorical columns (like 'credit_score > 750' or 'loan_status = Approved'). This path can be solved directly via SQL generation.
 
         Your output MUST be a single JSON object with the key 'intent'.
-        Example: {"intent": "SEMANTIC_SEARCH"}
+        Example: {{"intent": "SEMANTIC_SEARCH"}}
         """
     
     try:
@@ -167,18 +173,20 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     print(f"User Question: '{user_question}'")
     
     start_time = time.time()
-    intent = route_query_intent(llm_client, user_question)
+    
+    # --- UPDATED ROUTER CALL ---
+    intent = route_query_intent(llm_client, user_question, schema, df_sample)
+    
     print(f"-> STEP 1: Router Decision: **{intent}**")
     
     AUGMENTATION_HINT = ""
     semantic_lookup_duration = 0
 
     if intent == 'SEMANTIC_SEARCH':
-        # SEMANTIC PIPELINE: Fetch context using the original Excel/Input path for collection name derivation
+        # SEMANTIC PIPELINE: Fetch context using the original Excel/Input path
         lookup_start = time.time()
         print(f"-> STEP 2: Executing SEMANTIC SEARCH pipeline (using '{excel_path}' for context lookup)...")
         
-        # Call the retrieval function, passing the original Excel file path to find the correct collection name
         semantic_context = get_semantic_context_for_query(user_question, file_name=excel_path, limit=7) 
         semantic_lookup_duration = time.time() - lookup_start
         
@@ -240,10 +248,10 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
         temperature=0.0
     )
     sql_query = response.choices[0].message.content.strip()
+    
+    # Clean up markdown fences
     if sql_query.lower().startswith("```sql"):
         sql_query = sql_query[len("```sql"):].strip()
-    
-    # Check and strip the closing markdown code fence
     if sql_query.endswith("```"):
         sql_query = sql_query[:-len("```")].strip()
 
@@ -260,7 +268,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     # 6. Final Display
     if not result_df.empty and 'Error' not in result_df.columns:
         print("\nQuery Result:")
-        # Optional: Formatting for currency/amounts here
         print(result_df.to_markdown(index=False))
     elif 'Error' in result_df.columns:
         print(f"\n[EXECUTION ERROR] {result_df['Error'].iloc[0]}")
@@ -324,74 +331,19 @@ def main():
     print("### STARTING HYBRID TEXT-TO-SQL EXECUTION ###")
     print("#"*50)
     
-    # Test 1: Fuzzy Name Match (Targets a name in the sample data)
+    
+    # --- SEMANTIC SEARCH TEST BLOCKS (Testing RAG path) ---
+    
+    # Test 1: Fuzzy Name Match (Should trigger SEMANTIC_SEARCH)
     generate_and_execute_query(
         llm_client,
-        "Find the details for the client named Gregory Cervantes but spelled like 'Gregorio Cerwantiz'.",
+        "Find the details for the client named Kathleen Vasqez.",
         parquet_schema, 
         df_sample,
         dynamic_parquet_path,
         excel_input_path
     )
-
-    # Test 2: Conceptual Collateral Search (Uses a value from sample data)
-    # generate_and_execute_query(
-    #     llm_client,
-    #     "Which loans have poor quality collateral listed as 'lose'?",
-    #     parquet_schema, 
-    #     df_sample,
-    #     dynamic_parquet_path,
-    #     excel_input_path
-    # )
-
-    # # Test 3: Typo on Loan Type (Targets a loan_type in the sample data)
-    # generate_and_execute_query(
-    #     llm_client,
-    #     "Show all applications for Auto lons.",
-    #     parquet_schema, 
-    #     df_sample,
-    #     dynamic_parquet_path,
-    #     excel_input_path
-    # )
-    # # Test 4: Simple Global Aggregation
-    # generate_and_execute_query(
-    #     llm_client,
-    #     "What is the average applicant_income for all loans?",
-    #     parquet_schema,
-    #     df_sample,
-    #     dynamic_parquet_path,
-    #     excel_input_path
-    # )
-
-    # # Test 5: Counting with Multi-criteria Filter
-    # generate_and_execute_query(
-    #     llm_client,
-    #     "How many loans have a 'Pending' loan_status and a credit_score above 500?",
-    #     parquet_schema,
-    #     df_sample,
-    #     dynamic_parquet_path,
-    #     excel_input_path
-    # )
-
-    # # Test 6: Summation with Boolean Filter
-    # generate_and_execute_query(
-    #     llm_client,
-    #     "What is the total sum of the loan_amount_requested for applicants where is_employed is True?",
-    #     parquet_schema,
-    #     df_sample,
-    #     dynamic_parquet_path,
-    #     excel_input_path
-    # )
-
-    # # Test 7: Max Aggregation with String Filter
-    # generate_and_execute_query(
-    #     llm_client,
-    #     "What is the highest interest_rate offered for a quarterly Repayments?",
-    #     parquet_schema,
-    #     df_sample,
-    #     dynamic_parquet_path,
-    #     excel_input_path
-    # )
+    
     print("\n--- Execution Complete ---")
 
 

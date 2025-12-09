@@ -1,5 +1,3 @@
-# ret-new.py
-
 import os
 import sys
 from dotenv import load_dotenv
@@ -128,4 +126,9 @@ def get_semantic_context_for_query(query: str, file_name: str, collection_prefix
     context_list = [doc['text'] for doc in retrieved_docs]
     full_context = "\n\n".join(context_list)
     
-    return full_context 
+    # --- DEBUGGING LINE ADDED HERE ---
+    print(f'-> SUCCESS: Semantic context retrieved (Score: {retrieved_docs[0]["score"]:.4f}). Context preview:')
+    print('context: ',full_context) 
+    # ---------------------------------
+    
+    return full_context

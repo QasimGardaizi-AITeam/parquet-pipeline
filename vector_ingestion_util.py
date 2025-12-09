@@ -1,12 +1,11 @@
-# vector_ingestion_util.py
-
 import os
 import sys
 import pandas as pd
+import time # Added for index status polling
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from pymongo import MongoClient
-import pymongo # Crucial for WriteConcern and Atlas Commands
+import pymongo 
 from typing import List, Dict, Any, Union
 import traceback 
 
@@ -58,57 +57,66 @@ except Exception as e:
 
 def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 1536, index_name: str = "vector_index") -> bool:
     """
-    Creates the required Atlas Vector Search index if it does not already exist.
-    This must be done via the Atlas command, as standard MongoDB indexes are insufficient.
+    Creates the required Atlas Vector Search index if it does not already exist,
+    using the dedicated pymongo method (collection.create_search_index) and polling for the 'READY' status.
+    This is the robust replacement for the unreliable db.command("createSearchIndex", ...) call.
     """
+    collection = db[collection_name]
+    MAX_WAIT_TIME = 90  
+    POLL_INTERVAL = 10
+    start_time = time.time()
+
     try:
-        # Check for existing indexes on the collection
-        existing_indexes = db.command("listSearchIndexes", collection_name)
-        
-        for index in existing_indexes:
-            if index['name'] == index_name:
-                print(f"[INFO] Atlas Vector Search Index '{index_name}' already exists on '{collection_name}'. Skipping creation.")
+        # Check for existing indexes using collection.list_search_indexes()
+        existing_indexes = [index['name'] for index in collection.list_search_indexes()]
+
+        if index_name in existing_indexes:
+            print(f"[INFO] Atlas Vector Search Index '{index_name}' already exists on '{collection_name}'. Checking status...")
+        else:
+            # Define the Atlas Vector Search Index structure
+            index_definition = {
+                "type": "vectorSearch",
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": embedding_dim,
+                        "similarity": "cosine"
+                    },
+                    {"type": "filter", "path": "metadata"}
+                ]
+            }
+
+            print(f"[INFO] Creating Atlas Vector Search Index '{index_name}' on '{collection_name}'...")
+            
+            # --- CRITICAL CHANGE: Use collection.create_search_index() ---
+            collection.create_search_index(
+                model=index_definition, 
+                name=index_name
+            )
+            print(f"[SUCCESS] Index creation command sent. Atlas is building the index.")
+
+        # --- WAIT FOR INDEX ACTIVE STATE ---
+        while time.time() - start_time < MAX_WAIT_TIME:
+            # Retrieve index details to check status
+            indexes = collection.list_search_indexes()
+            target_index = next((i for i in indexes if i['name'] == index_name), None)
+
+            if target_index and target_index.get('status') == 'READY':
+                print(f"[SUCCESS] Index '{index_name}' is active and ready for search.")
                 return True
 
-        # Define the Atlas Vector Search Index structure
-        index_definition = {
-            "name": index_name,
-            "type": "vectorSearch",
-            "fields": [
-                {
-                    "type": "vector",
-                    "path": "embedding",
-                    "numDimensions": embedding_dim,
-                    "similarity": "cosine"
-                },
-                {
-                    "type": "filter",
-                    "path": "metadata"
-                }
-            ]
-        }
-        
-        print(f"[INFO] Creating Atlas Vector Search Index '{index_name}' on '{collection_name}'...")
-        
-        # Execute the command to create the index
-        db.command(
-            "createSearchIndex", 
-            collection_name, 
-            body=index_definition
-        )
-        
-        print(f"[SUCCESS] Index creation command sent. Atlas will now build the index (this may take a minute).")
-        return True
+            status = target_index.get('status', 'PENDING') if target_index else 'PENDING'
+            print(f"[WAITING] Index status: {status}. Waiting {POLL_INTERVAL}s...")
+            time.sleep(POLL_INTERVAL)
 
-    except pymongo.errors.OperationFailure as e:
-        # Handle cases where the index is pending or already exists (e.g., if another process is building it)
-        if "Index with name" in str(e):
-             print(f"[WARNING] Index '{index_name}' appears to be in a pending state or already exists. Continuing.")
-             return True
-        print(f"[ERROR] Failed to create Atlas Vector Search Index: {e}")
-        return False
+        print(f"[WARNING] Index '{index_name}' did not become active within {MAX_WAIT_TIME} seconds. Search may still fail.")
+        return True 
+
     except Exception as e:
-        print(f"[ERROR] An unexpected error occurred during index creation: {e}")
+        # Catch any errors during creation/polling
+        traceback.print_exc(file=sys.stdout)
+        print(f"[FATAL ERROR] Failed to create or verify Atlas Vector Search Index: {e}")
         return False
 
 
@@ -218,7 +226,7 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
             print(f"Clearing old documents from '{COLLECTION_NAME}'...")
             collection.delete_many({}) 
             
-            print(f"Attempting to insert {len(mongo_documents)} documents (synchronously)...")
+            print(f"Attempting to insert {len(mongo_documents)} documents...")
             
             result = collection.insert_many(
                 mongo_documents, 
@@ -244,20 +252,3 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
             return f"An error occurred during MongoDB insertion: {e}"
     
     return "No documents were generated for insertion."
-
-
-# ------------------------------------------------
-# 4. Standalone Execution for Testing
-# ------------------------------------------------
-if __name__ == "__main__":
-    # Example usage when running script directly
-    FILE_TO_INDEX = "../sheets/loan.xlsx" 
-    
-    if os.path.exists(FILE_TO_INDEX):
-        result = ingest_to_vector_db(FILE_TO_INDEX)
-        if result is True:
-            print("\nFinal Status: INGESTION SUCCESSFUL.")
-        else:
-            print(f"\nFinal Status: INGESTION FAILED. Reason: {result}")
-    else:
-        print(f"ERROR: Cannot run standalone test. File not found at {FILE_TO_INDEX}")
