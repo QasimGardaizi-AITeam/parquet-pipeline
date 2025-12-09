@@ -1,4 +1,4 @@
-# 🤖 Hybrid RAG Text-to-SQL System
+# 🤖 Hybrid Tabular Analysis
 
 This project implements a robust Hybrid Retrieval-Augmented Generation (RAG) pipeline to translate natural language questions into executable DuckDB SQL queries. It uses a dynamic router to choose between two execution paths:
 1.  **Semantic Search (RAG):** For fuzzy matching, names, and conceptual queries (using Azure OpenAI Embeddings and MongoDB Atlas Vector Search).

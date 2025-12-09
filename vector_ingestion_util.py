@@ -236,7 +236,8 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
             # Explicitly check if insertion was successful
             if len(result.inserted_ids) == len(mongo_documents):
                 print(f"Successfully inserted {len(mongo_documents)} chunks. (Write Acknowledged)")
-                
+                print("[WAIT] Waiting 5 seconds for Atlas Search indexing to catch up with new data...")
+                time.sleep(5)
                 # --- NEW STEP: AUTOMATICALLY ENSURE INDEX EXISTS ---
                 index_success = ensure_vector_search_index(db, COLLECTION_NAME, embedding_dim=embedding_dim)
                 if not index_success:

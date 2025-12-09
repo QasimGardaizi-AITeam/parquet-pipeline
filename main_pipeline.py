@@ -328,7 +328,7 @@ def main():
     
     # STEP 2: RUN THE HYBRID RAG FLOW
     print("\n\n" + "#"*50)
-    print("### STARTING HYBRID TEXT-TO-SQL EXECUTION ###")
+    print("### STARTING EXECUTION ###")
     print("#"*50)
     
     
