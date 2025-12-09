@@ -10,19 +10,13 @@ from typing import List, Dict, Any, Union
 import traceback 
 
 # --- 1. Environment & Client Setup ---
-
-# Load environment variables once at the module level
 load_dotenv()
-
-# --- Configuration Mapping ---
 try:
-    # Azure OpenAI Configuration
     AZURE_ENDPOINT = f"https://{os.environ['OPENAI_EMBEDDING_RESOURCE']}.openai.azure.com/"
     AZURE_API_KEY = os.environ['OPENAI_EMBEDDING_API_KEY']
     AZURE_API_VERSION = os.environ['OPENAI_EMBEDDING_VERSION']
     AZURE_DEPLOYMENT_NAME = os.environ['OPENAI_EMBEDDING_MODEL']
     
-    # MongoDB Configuration
     MONGO_URI = os.environ['MONGO_URI']
     DATABASE_NAME = "vector_rag_db" 
     
@@ -30,7 +24,6 @@ except KeyError as e:
     print(f"FATAL ERROR (Ingestion): Missing environment variable {e}. Ingestion cannot proceed.")
     sys.exit(1)
 
-# Initialize Clients (Outside the main function, for efficient connection pooling)
 try:
     openai_client = AzureOpenAI(
         azure_endpoint=AZURE_ENDPOINT,
@@ -42,7 +35,6 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    # Increased timeout for large bulk operations
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=60000) 
     db = mongo_client[DATABASE_NAME]
     mongo_client.admin.command('ping')
@@ -50,11 +42,7 @@ except Exception as e:
     print(f"FATAL ERROR (Ingestion): Error connecting to MongoDB Atlas: {e}")
     sys.exit(1)
 
-
-# ------------------------------------------------
 # 2. Utility Functions
-# ------------------------------------------------
-
 def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 1536, index_name: str = "vector_index") -> bool:
     """
     Creates the required Atlas Vector Search index if it does not already exist,
@@ -67,13 +55,11 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
     start_time = time.time()
 
     try:
-        # Check for existing indexes using collection.list_search_indexes()
         existing_indexes = [index['name'] for index in collection.list_search_indexes()]
 
         if index_name in existing_indexes:
             print(f"[INFO] Atlas Vector Search Index '{index_name}' already exists on '{collection_name}'. Checking status...")
         else:
-            # Define the Atlas Vector Search Index structure
             index_definition = {
                 "type": "vectorSearch",
                 "fields": [
@@ -89,7 +75,6 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
 
             print(f"[INFO] Creating Atlas Vector Search Index '{index_name}' on '{collection_name}'...")
             
-            # --- CRITICAL CHANGE: Use collection.create_search_index() ---
             collection.create_search_index(
                 model=index_definition, 
                 name=index_name
@@ -98,7 +83,6 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
 
         # --- WAIT FOR INDEX ACTIVE STATE ---
         while time.time() - start_time < MAX_WAIT_TIME:
-            # Retrieve index details to check status
             indexes = collection.list_search_indexes()
             target_index = next((i for i in indexes if i['name'] == index_name), None)
 
@@ -114,7 +98,6 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
         return True 
 
     except Exception as e:
-        # Catch any errors during creation/polling
         traceback.print_exc(file=sys.stdout)
         print(f"[FATAL ERROR] Failed to create or verify Atlas Vector Search Index: {e}")
         return False
@@ -129,7 +112,6 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
     current_size = 0
 
     for idx, row in df.iterrows():
-        # CRITICAL: Ensure row values are converted to string for reliable chunking
         row_text = " | ".join([f"{col}:{str(row[col])}" for col in headers]) 
         row_index_label = df.index.name if df.index.name else 'index'
         row_text_with_index = f"[{row_index_label} {idx}] {row_text}"
@@ -154,15 +136,12 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
     return chunks
 
 
-# ------------------------------------------------
+
 # 3. Core Ingestion Function
-# ------------------------------------------------
 def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") -> Union[bool, str]:
     """
     Loads data from the given file, chunks, embeds, and inserts into MongoDB Atlas.
     """
-    
-    # 1. Determine Dynamic Collection Name and Collection Object
     base_name = os.path.splitext(os.path.basename(file_path))[0]
     COLLECTION_NAME = f"{collection_prefix}_{base_name}"
     
@@ -238,7 +217,6 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
                 print(f"Successfully inserted {len(mongo_documents)} chunks. (Write Acknowledged)")
                 print("[WAIT] Waiting 5 seconds for Atlas Search indexing to catch up with new data...")
                 time.sleep(5)
-                # --- NEW STEP: AUTOMATICALLY ENSURE INDEX EXISTS ---
                 index_success = ensure_vector_search_index(db, COLLECTION_NAME, embedding_dim=embedding_dim)
                 if not index_success:
                     return "Error: Data inserted, but Atlas Vector Index creation failed."
@@ -248,7 +226,6 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
                 return "Error: MongoDB insertion count mismatch."
             
         except Exception as e:
-            # Print the detailed exception for diagnosis if insertion fails
             traceback.print_exc(file=sys.stdout)
             return f"An error occurred during MongoDB insertion: {e}"
     

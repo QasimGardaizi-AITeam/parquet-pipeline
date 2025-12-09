@@ -9,18 +9,13 @@ from datetime import datetime
 from dotenv import load_dotenv
 from typing import Literal, Tuple
 import time
-
-# NOTE: Ensure these imports point to your custom files
 from retrival_util import get_semantic_context_for_query 
 from vector_ingestion_util import ingest_to_vector_db 
 
-# Load environment variables first
 load_dotenv()
 
-# --- Configuration Class ---
 class Config:
     """Centralized configuration constants."""
-    # LLM Client (GPT-4o) Configuration
     LLM_DEPLOYMENT_NAME = os.getenv("azureOpenAIApiDeploymentName") 
     LLM_API_KEY = os.getenv("azureOpenAIApiKey")
     LLM_ENDPOINT = os.getenv("azureOpenAIEndpoint")
@@ -48,10 +43,7 @@ class Config:
             print("\n[FATAL] Missing one or more critical Azure OpenAI environment variables.")
             sys.exit(1)
 
-# -------------------------------------------------------------
 # 1. CLIENT SETUP AND UTILITIES
-# -------------------------------------------------------------
-
 def setup_llm_client():
     """Configures the native AzureOpenAI client."""
     try:
@@ -87,10 +79,7 @@ def get_parquet_context(parquet_path: str) -> Tuple[str, pd.DataFrame]:
         print(f"[FATAL ERROR] Failed to retrieve Parquet context: {e}")
         return "TABLE SCHEMA: Failed to load dynamic schema.", pd.DataFrame()
 
-# -------------------------------------------------------------
 # 2. DATA PROCESSING AND DUCKDB EXECUTION
-# -------------------------------------------------------------
-
 def convert_excel_to_parquet(input_path: str, output_path: str) -> None:
     """Reads Excel, converts to Parquet, saves locally, and frees memory."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -115,18 +104,13 @@ def execute_duckdb_query(query: str) -> pd.DataFrame:
         print(f"[ERROR] DuckDB query execution failed: {e}")
         return pd.DataFrame({'Error': [str(e)]})
 
-
-# -------------------------------------------------------------
 # 3. LLM ROUTER & CORE RAG FUNCTION
-# -------------------------------------------------------------
-
 def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame) -> Literal['SEMANTIC_SEARCH', 'SQL_QUERY']:
     """
     Uses the LLM to classify the user's question intent based on schema and sample data.
     """
     if not llm_client: return 'SQL_QUERY'
 
-    # The Router Prompt now includes the data context
     ROUTER_SYSTEM_PROMPT = f"""
         You are an intelligent routing agent. Your task is to classify the user's question based on the provided database context.
 
@@ -178,7 +162,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     
     start_time = time.time()
     
-    # --- UPDATED ROUTER CALL ---
     intent = route_query_intent(llm_client, user_question, schema, df_sample)
     
     print(f"-> STEP 1: Router Decision: **{intent}**")
@@ -187,7 +170,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     semantic_lookup_duration = 0
 
     if intent == 'SEMANTIC_SEARCH':
-        # SEMANTIC PIPELINE: Fetch context using the original Excel/Input path
         lookup_start = time.time()
         print(f"-> STEP 2: Executing SEMANTIC SEARCH pipeline (using '{excel_path}' for context lookup)...")
         
@@ -210,7 +192,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     else:
         print("-> STEP 2: Executing DIRECT SQL pipeline. No vector search needed.")
 
-    # 3. LLM Prompt Construction (Augmented System Prompt)
     SYSTEM_PROMPT = f"""
         You are an expert SQL Generator optimized for DuckDB. Your task is to translate a user's question into a single, valid, executable SQL query.
 
@@ -241,7 +222,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
         5. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query. Do not include any explanations, comments, or surrounding Markdown formatting (e.g., ```sql`).
         """
 
-    # 4. LLM Call to Generate SQL
     print("-> STEP 3: Calling LLM to generate SQL...")
     response = llm_client.chat.completions.create(
         model=Config.LLM_DEPLOYMENT_NAME,
@@ -253,7 +233,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     )
     sql_query = response.choices[0].message.content.strip()
     
-    # Clean up markdown fences
     if sql_query.lower().startswith("```sql"):
         sql_query = sql_query[len("```sql"):].strip()
     if sql_query.endswith("```"):
@@ -261,7 +240,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
 
     print(f"-> Generated SQL: {sql_query}")
         
-    # 5. DuckDB Execution
     print("-> STEP 4: Executing DuckDB query...")
     result_df = execute_duckdb_query(sql_query)
 
@@ -269,7 +247,6 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     total_duration = end_time - start_time
     print(f"--- Query Finished in {total_duration:.2f} seconds (Semantic lookup: {semantic_lookup_duration:.2f}s) ---")
     
-    # 6. Final Display
     if not result_df.empty and 'Error' not in result_df.columns:
         print("\nQuery Result:")
         print(result_df.to_markdown(index=False))
@@ -280,19 +257,14 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
 
     return result_df
 
-
-# -------------------------------------------------------------
 # 4. MAIN EXECUTION
-# -------------------------------------------------------------
-
 def main():
     
     Config.validate_env()
     
-    # Use the static input path for ingestion and to derive the dynamic parquet path
     excel_input_path = Config.INPUT_FILE_PATH
     dynamic_parquet_path = Config.get_parquet_path(excel_input_path)
-    Config.PARQUET_FILE_PATH = dynamic_parquet_path # Update global config for LLM reference
+    Config.PARQUET_FILE_PATH = dynamic_parquet_path 
 
     llm_client = setup_llm_client()
     if not llm_client: sys.exit(1)
@@ -304,10 +276,7 @@ def main():
         sys.exit(1)
 
     try:
-        # STEP 1A: Process Data (Excel to Parquet)
         convert_excel_to_parquet(excel_input_path, dynamic_parquet_path)
-        
-        # STEP 1B: Run Vector Ingestion (Pre-index the source Excel file)
         ingestion_status = ingest_to_vector_db(excel_input_path)
         
         if ingestion_status is True:
@@ -319,7 +288,6 @@ def main():
         print(f"\n[FATAL] Pipeline failed during file processing: {e}")
         sys.exit(1)
         
-    # Get and Print Context
     parquet_schema, df_sample = get_parquet_context(dynamic_parquet_path)
     
     print("\n" + "="*50)
@@ -329,14 +297,9 @@ def main():
     print("\n### Top 5 Rows (Sample Data) ###\n" + df_sample.to_markdown(index=False))
     print("="*50)
     
-    
-    # STEP 2: RUN THE HYBRID RAG FLOW
     print("\n\n" + "#"*50)
     print("### STARTING EXECUTION ###")
     print("#"*50)
-    
-    
-    # --- SEMANTIC SEARCH TEST BLOCKS (Testing RAG path) ---
     
     # Test 1: Fuzzy Name Match (Should trigger SEMANTIC_SEARCH)
     generate_and_execute_query(
@@ -347,16 +310,17 @@ def main():
         dynamic_parquet_path,
         excel_input_path
     )
+    
+    # Test 2: Simple SQL Query Should Execute
     generate_and_execute_query(
         llm_client,
-        "What is the maximum average applicant_income for all loans?",
+        "What is the maximum applicant_income for all loans?",
         parquet_schema, 
         df_sample,
         dynamic_parquet_path,
         excel_input_path
     )
     print("\n--- Execution Complete ---")
-
 
 if __name__ == "__main__":
     main()

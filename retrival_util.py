@@ -6,20 +6,14 @@ from pymongo import MongoClient
 from typing import List, Dict
 
 # --- 1. Configuration and Initialization ---
-
 load_dotenv()
-
-# --- Configuration (Must match the ingestion script) ---
 try:
-    # Azure OpenAI Configuration
     AZURE_ENDPOINT = f"https://{os.environ['OPENAI_EMBEDDING_RESOURCE']}.openai.azure.com/"
     AZURE_API_KEY = os.environ['OPENAI_EMBEDDING_API_KEY']
     AZURE_API_VERSION = os.environ['OPENAI_EMBEDDING_VERSION']
     
-    # Embedding Model (Used to vectorize the query)
     EMBEDDING_DEPLOYMENT_NAME = os.environ['OPENAI_EMBEDDING_MODEL']
     
-    # MongoDB Configuration
     MONGO_URI = os.environ['MONGO_URI']
     DATABASE_NAME = "vector_rag_db"
     VECTOR_INDEX_NAME = "vector_index" 
@@ -28,7 +22,6 @@ except KeyError as e:
     print(f"FATAL ERROR (Retrieval): Missing environment variable {e}.")
     sys.exit(1)
 
-# Initialize Clients
 try:
     openai_client = AzureOpenAI(
         azure_endpoint=AZURE_ENDPOINT,
@@ -48,10 +41,8 @@ except Exception as e:
     sys.exit(1)
 
 
-# ------------------------------------------------
-# 2. Retrieval Functions
-# ------------------------------------------------
 
+# 2. Retrieval Functions
 def get_query_embedding(query: str) -> List[float]:
     """Generates the vector embedding for the query using Azure OpenAI."""
     try:
@@ -70,7 +61,6 @@ def retrieve_chunks(collection_name: str, query_vector: List[float], limit: int 
     """
     collection = db[collection_name]
     
-    # The MongoDB Aggregation Pipeline for Vector Search
     pipeline = [
         {
             # Stage 1: Perform the vector search
@@ -107,16 +97,13 @@ def get_semantic_context_for_query(query: str, file_name: str, collection_prefix
     dynamically determining the collection name from the file name.
     """
     
-    # 1. Determine Dynamic Collection Name
     base_name = os.path.splitext(os.path.basename(file_name))[0]
     collection_name = f"{collection_prefix}_{base_name}"
     
-    # 2. Embed the Query
     query_vector = get_query_embedding(query)
     if not query_vector:
         return ""
 
-    # 3. Retrieve Context from MongoDB Atlas
     retrieved_docs = retrieve_chunks(collection_name, query_vector, limit=limit)
     
     if not retrieved_docs:
