@@ -343,7 +343,14 @@ def main():
         dynamic_parquet_path,
         excel_input_path
     )
-    
+    generate_and_execute_query(
+        llm_client,
+        "What is the maximum average applicant_income for all loans?",
+        parquet_schema, 
+        df_sample,
+        dynamic_parquet_path,
+        excel_input_path
+    )
     print("\n--- Execution Complete ---")
 
 

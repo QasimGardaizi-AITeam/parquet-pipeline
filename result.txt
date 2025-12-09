@@ -1,11 +1,14 @@
+Query 1: Correct Identified as Semantic
 Query Mentioned Misspelled {Kathleen Vasqez}
 Semantic Search Returned Result of Correct {Kathleen Vasquez}
+
+Query 2: Correctly Identified as SQL_QUERY
 
 [INFO] AzureOpenAI Client configured successfully for deployment: auxee-gpt-4o
 
 --- Data Pipeline Execution Started ---
 [INFO] Converting 'loan.xlsx' to Parquet...
-^[[D[SUCCESS] Parquet file saved at: ../data/loan_20251209191628_1eaa2956.parquet
+[SUCCESS] Parquet file saved at: ../data/loan_20251209194135_c3ba6776.parquet
 
 --- Starting Ingestion for Collection: 'data_source_loan' ---
 Data loaded: 1000 rows.
@@ -23,7 +26,7 @@ Successfully inserted 500 chunks. (Write Acknowledged)
 [SUCCESS] Vector DB is up-to-date with the latest data.
 
 ##################################################
-### STARTING HYBRID TEXT-TO-SQL EXECUTION ###
+### STARTING EXECUTION ###
 ##################################################
 
 
@@ -33,8 +36,7 @@ User Question: 'Find the details for the client named Kathleen Vasqez.'
 -> STEP 2: Executing SEMANTIC SEARCH pipeline (using '../sheets/loan.xlsx' for context lookup)...
 -> SUCCESS: Semantic context retrieved (Score: 0.8827). Context preview:
 
-
-Top 7K From Vector Database:  
+context retrived from vectordb:
 [index 194] loan_application_id:1b2fa939-9af5-4610-81a0-bf379320a656 | applicant_name:Kathleen Vasquez | loan_amount_requested:32300.7 | loan_type:Student | applicant_income:72110.12 | credit_score:519 | loan_status:Approved | repayment_schedule:Quarterly | interest_rate:8.04 | loan_term:24 | collateral:college | application_date:2025-05-11 | approved_amount:38840.8 | repayment_start_date:nan | is_employed:True | monthly_payment:886.0
 [index 195] loan_application_id:a863654e-ab2d-4bc1-abbb-b3e608d81015 | applicant_name:Judy Johnson MD | loan_amount_requested:37088.98 | loan_type:Student | applicant_income:33316.9 | credit_score:793 | loan_status:In Review | repayment_schedule:Quarterly | interest_rate:3.46 | loan_term:60 | collateral:nan | application_date:2025-05-17 | approved_amount:38381.06 | repayment_start_date:2025-08-28 | is_employed:True | monthly_payment:611.11
 
@@ -58,13 +60,28 @@ Top 7K From Vector Database:
 
 -> Context found. Prompt will be augmented.
 -> STEP 3: Calling LLM to generate SQL...
--> Generated SQL: SELECT * FROM read_parquet('../data/loan_20251209191628_1eaa2956.parquet') WHERE applicant_name = 'Kathleen Vasquez';
+-> Generated SQL: SELECT * FROM read_parquet('../data/loan_20251209194135_c3ba6776.parquet') WHERE applicant_name = 'Kathleen Vasquez';
 -> STEP 4: Executing DuckDB query...
---- Query Finished in 13.30 seconds (Semantic lookup: 3.61s) ---
+--- Query Finished in 5.85 seconds (Semantic lookup: 2.33s) ---
 
 Query Result:
 | loan_application_id                  | applicant_name   |   loan_amount_requested | loan_type   |   applicant_income |   credit_score | loan_status   | repayment_schedule   |   interest_rate |   loan_term | collateral   | application_date   |   approved_amount | repayment_start_date   | is_employed   |   monthly_payment |
 |:-------------------------------------|:-----------------|------------------------:|:------------|-------------------:|---------------:|:--------------|:---------------------|----------------:|------------:|:-------------|:-------------------|------------------:|:-----------------------|:--------------|------------------:|
 | 1b2fa939-9af5-4610-81a0-bf379320a656 | Kathleen Vasquez |                 32300.7 | Student     |            72110.1 |            519 | Approved      | Quarterly            |            8.04 |          24 | college      | 2025-05-11         |           38840.8 |                        | True          |               886 |
+
+
+--- Processing Query ---
+User Question: 'What is the maximum average applicant_income for all loans?'
+-> STEP 1: Router Decision: **SQL_QUERY**
+-> STEP 2: Executing DIRECT SQL pipeline. No vector search needed.
+-> STEP 3: Calling LLM to generate SQL...
+-> Generated SQL: SELECT MAX(applicant_income) AS max_average_applicant_income FROM read_parquet('../data/loan_20251209194135_c3ba6776.parquet');
+-> STEP 4: Executing DuckDB query...
+--- Query Finished in 2.46 seconds (Semantic lookup: 0.00s) ---
+
+Query Result:
+|   max_average_applicant_income |
+|-------------------------------:|
+|                         119998 |
 
 --- Execution Complete ---
