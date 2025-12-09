@@ -2,6 +2,11 @@ Query 1: Correct Identified as Semantic
 Query Mentioned Misspelled {Kathleen Vasqez}
 Semantic Search Returned Result of Correct {Kathleen Vasquez}
 
+Query 2: Correct Identified as Semantic
+Query Mentioned Misspelled {Harrison, Teresa}
+Semantic Search Returned Result of Correct {Teresa Harrison}
+
+
 Query 2: Correctly Identified as SQL_QUERY
 
 [INFO] AzureOpenAI Client configured successfully for deployment: auxee-gpt-4o
@@ -69,6 +74,41 @@ Query Result:
 |:-------------------------------------|:-----------------|------------------------:|:------------|-------------------:|---------------:|:--------------|:---------------------|----------------:|------------:|:-------------|:-------------------|------------------:|:-----------------------|:--------------|------------------:|
 | 1b2fa939-9af5-4610-81a0-bf379320a656 | Kathleen Vasquez |                 32300.7 | Student     |            72110.1 |            519 | Approved      | Quarterly            |            8.04 |          24 | college      | 2025-05-11         |           38840.8 |                        | True          |               886 |
 
+--- Processing Query ---
+User Question: 'What is credit Score of Harrison, Teresa.'
+-> STEP 1: Router Decision: **SEMANTIC_SEARCH**
+-> STEP 2: Executing SEMANTIC SEARCH pipeline (using '../sheets/loan.xlsx' for context lookup)...
+-> SUCCESS: Semantic context retrieved (Score: 0.8798). Context preview:
+context:  [index 44] loan_application_id:862a3223-3cc5-4c35-b468-ef04cecad506 | applicant_name:Teresa Harrison | loan_amount_requested:37583.7 | loan_type:Auto | applicant_income:74297.12 | credit_score:620 | loan_status:Denied | repayment_schedule:Annually | interest_rate:6.71 | loan_term:60 | collateral:half | application_date:2025-06-01 | approved_amount:nan | repayment_start_date:2025-10-26 | is_employed:True | monthly_payment:1399.71
+[index 45] loan_application_id:63b2c245-4c20-4268-813b-d80ae5bb6bdf | applicant_name:Sherry Duffy | loan_amount_requested:19365.85 | loan_type:Student | applicant_income:47037.67 | credit_score:828 | loan_status:In Review | repayment_schedule:Monthly | interest_rate:4.29 | loan_term:48 | collateral:nan | application_date:2025-03-20 | approved_amount:9756.84 | repayment_start_date:nan | is_employed:False | monthly_payment:984.86
+
+[index 550] loan_application_id:cc99e7b0-bd3d-4673-ba8c-916a66620122 | applicant_name:Courtney Hurst | loan_amount_requested:15374.41 | loan_type:Auto | applicant_income:43336.87 | credit_score:656 | loan_status:In Review | repayment_schedule:Annually | interest_rate:9.92 | loan_term:48 | collateral:fall | application_date:2025-11-10 | approved_amount:5219.27 | repayment_start_date:nan | is_employed:False | monthly_payment:294.45
+[index 551] loan_application_id:8d49c619-9e38-4440-876a-221532157a95 | applicant_name:Luke Montgomery | loan_amount_requested:19094.66 | loan_type:Student | applicant_income:102743.5 | credit_score:647 | loan_status:Denied | repayment_schedule:Annually | interest_rate:6.07 | loan_term:48 | collateral:nan | application_date:2025-09-13 | approved_amount:nan | repayment_start_date:2025-03-01 | is_employed:False | monthly_payment:734.23
+
+[index 468] loan_application_id:dbe65bf8-acb9-4487-b027-1f3d7c241d29 | applicant_name:Jeffrey Harvey | loan_amount_requested:44240.4 | loan_type:Personal | applicant_income:44646.18 | credit_score:336 | loan_status:In Review | repayment_schedule:Quarterly | interest_rate:5.34 | loan_term:12 | collateral:above | application_date:2025-06-27 | approved_amount:nan | repayment_start_date:nan | is_employed:True | monthly_payment:268.82
+[index 469] loan_application_id:962f6145-6c6e-4a90-b716-edc2eba575da | applicant_name:Katelyn Owen | loan_amount_requested:39843.66 | loan_type:Personal | applicant_income:69630.99 | credit_score:680 | loan_status:Approved | repayment_schedule:Annually | interest_rate:7.9 | loan_term:12 | collateral:nan | application_date:2025-05-11 | approved_amount:nan | repayment_start_date:2025-11-20 | is_employed:True | monthly_payment:385.57
+
+[index 454] loan_application_id:521112d8-5006-4954-8289-6298533cd40c | applicant_name:Theresa Taylor | loan_amount_requested:11070.32 | loan_type:Personal | applicant_income:61047.0 | credit_score:685 | loan_status:Denied | repayment_schedule:Annually | interest_rate:3.58 | loan_term:24 | collateral:nan | application_date:2025-11-11 | approved_amount:28111.77 | repayment_start_date:nan | is_employed:False | monthly_payment:494.71
+[index 455] loan_application_id:f04f6eae-f3fd-448f-b01d-4dec95d89735 | applicant_name:Tara Jenkins | loan_amount_requested:39632.47 | loan_type:Mortgage | applicant_income:95097.15 | credit_score:729 | loan_status:Pending | repayment_schedule:Monthly | interest_rate:8.67 | loan_term:36 | collateral:nan | application_date:2025-10-06 | approved_amount:nan | repayment_start_date:nan | is_employed:True | monthly_payment:285.71
+
+[index 342] loan_application_id:188d7b5b-d782-43d9-a458-e3c8268313ee | applicant_name:Tina Hendricks | loan_amount_requested:49751.76 | loan_type:Mortgage | applicant_income:30682.74 | credit_score:403 | loan_status:Pending | repayment_schedule:Annually | interest_rate:9.81 | loan_term:24 | collateral:nan | application_date:2025-02-19 | approved_amount:36971.88 | repayment_start_date:2025-03-27 | is_employed:False | monthly_payment:896.14
+[index 343] loan_application_id:f3ac76f2-8c34-452d-aa8e-1562713cb249 | applicant_name:Terrence Grant | loan_amount_requested:17805.38 | loan_type:Mortgage | applicant_income:110950.84 | credit_score:838 | loan_status:In Review | repayment_schedule:Quarterly | interest_rate:6.3 | loan_term:12 | collateral:most | application_date:2025-10-08 | approved_amount:nan | repayment_start_date:2025-08-20 | is_employed:True | monthly_payment:212.23
+
+[index 466] loan_application_id:9b6437c4-cca0-4273-bade-a526ac066a19 | applicant_name:Laurie Herrera | loan_amount_requested:10473.11 | loan_type:Mortgage | applicant_income:109905.5 | credit_score:716 | loan_status:Approved | repayment_schedule:Annually | interest_rate:4.69 | loan_term:36 | collateral:nan | application_date:2025-11-19 | approved_amount:nan | repayment_start_date:2025-06-13 | is_employed:False | monthly_payment:1029.73
+[index 467] loan_application_id:9b71926c-f58c-4350-81ce-f58bc265219f | applicant_name:Robert Garcia | loan_amount_requested:20974.41 | loan_type:Mortgage | applicant_income:41559.34 | credit_score:638 | loan_status:Approved | repayment_schedule:Annually | interest_rate:3.57 | loan_term:48 | collateral:ball | application_date:2025-02-27 | approved_amount:nan | repayment_start_date:nan | is_employed:False | monthly_payment:731.91
+
+[index 190] loan_application_id:a7b6e566-e7ac-4479-9694-142f1b423d30 | applicant_name:Sharon Stevens | loan_amount_requested:44852.28 | loan_type:Mortgage | applicant_income:43291.57 | credit_score:689 | loan_status:Approved | repayment_schedule:Annually | interest_rate:4.11 | loan_term:60 | collateral:nan | application_date:2025-08-04 | approved_amount:nan | repayment_start_date:nan | is_employed:False | monthly_payment:567.16
+[index 191] loan_application_id:6a31e4f4-1431-4540-9e8d-be4c5902c3ca | applicant_name:Cindy Griffith | loan_amount_requested:19139.77 | loan_type:Auto | applicant_income:43743.67 | credit_score:559 | loan_status:In Review | repayment_schedule:Annually | interest_rate:4.55 | loan_term:12 | collateral:nan | application_date:2025-03-04 | approved_amount:25003.6 | repayment_start_date:nan | is_employed:False | monthly_payment:1056.34
+-> Context found. Prompt will be augmented.
+-> STEP 3: Calling LLM to generate SQL...
+-> Generated SQL: SELECT credit_score FROM read_parquet('../data/loan_20251209205458_f53e5af1.parquet') WHERE applicant_name = 'Teresa Harrison';
+-> STEP 4: Executing DuckDB query...
+--- Query Finished in 2.84 seconds (Semantic lookup: 0.52s) ---
+
+Query Result:
+|   credit_score |
+|---------------:|
+|            620 |
 
 --- Processing Query ---
 User Question: 'What is the maximum average applicant_income for all loans?'

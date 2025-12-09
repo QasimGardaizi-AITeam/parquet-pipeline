@@ -9,7 +9,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 from typing import Literal, Tuple
 import time
+
+# NOTE: Ensure retrival_util.py has the debugging print for context retrieval
 from retrival_util import get_semantic_context_for_query 
+# NOTE: Ensure vector_ingestion_util.py has the new wait_for_vector_sync logic
 from vector_ingestion_util import ingest_to_vector_db 
 
 load_dotenv()
@@ -90,6 +93,7 @@ def convert_excel_to_parquet(input_path: str, output_path: str) -> None:
     df.to_parquet(output_path, engine='pyarrow', compression='snappy', index=False)
     print(f"[SUCCESS] Parquet file saved at: {output_path}")
     
+    # CRITICAL: Delete the DataFrame object to free up RAM
     del df
     print("[INFO] Pandas DataFrame deleted from memory.")
 
@@ -171,6 +175,8 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
 
     if intent == 'SEMANTIC_SEARCH':
         lookup_start = time.time()
+        # The excel_path is passed as 'file_name' because the ingestion utility uses it 
+        # to derive the MongoDB collection name (e.g., data_source_loan)
         print(f"-> STEP 2: Executing SEMANTIC SEARCH pipeline (using '{excel_path}' for context lookup)...")
         
         semantic_context = get_semantic_context_for_query(user_question, file_name=excel_path, limit=7) 
@@ -233,6 +239,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     )
     sql_query = response.choices[0].message.content.strip()
     
+    # Clean up common LLM code block wrappers
     if sql_query.lower().startswith("```sql"):
         sql_query = sql_query[len("```sql"):].strip()
     if sql_query.endswith("```"):
@@ -277,13 +284,17 @@ def main():
 
     try:
         convert_excel_to_parquet(excel_input_path, dynamic_parquet_path)
-        ingestion_status = ingest_to_vector_db(excel_input_path)
+        # CRITICAL: Use the excel_input_path (source file name) for ingestion
+        # so it can determine the collection name (e.g., data_source_loan)
+        ingestion_status = ingest_to_vector_db(excel_input_path) 
         
         if ingestion_status is True:
             print("\n[SUCCESS] Vector DB is up-to-date with the latest data.")
         else:
-            print(f"\n[WARNING] Vector DB Ingestion Failed: {ingestion_status}. Semantic search will be unavailable.")
-
+            # Prints the detailed error message from the ingest_to_vector_db return value
+            print(f"\n[WARNING] Vector DB Ingestion Failed: {ingestion_status}. Semantic search will be unreliable.")
+            # Do not exit, continue with SQL-only path
+            
     except Exception as e:
         print(f"\n[FATAL] Pipeline failed during file processing: {e}")
         sys.exit(1)
@@ -301,7 +312,7 @@ def main():
     print("### STARTING EXECUTION ###")
     print("#"*50)
     
-    # Test 1: Fuzzy Name Match (Should trigger SEMANTIC_SEARCH)
+    # Test 1: Fuzzy Name Match (Should trigger SEMANTIC_SEARCH and utilize the RAG sync fix)
     generate_and_execute_query(
         llm_client,
         "Find the details for the client named Kathleen Vasqez.",
@@ -311,15 +322,37 @@ def main():
         excel_input_path
     )
     
-    # Test 2: Simple SQL Query Should Execute
+    
+    # Test 2: Fuzzy Name Match (Should trigger SEMANTIC_SEARCH and utilize the RAG sync fix)
     generate_and_execute_query(
         llm_client,
-        "What is the maximum applicant_income for all loans?",
+        "What is credit Score of Harrison, Teresa.",
         parquet_schema, 
         df_sample,
         dynamic_parquet_path,
         excel_input_path
     )
+    
+    # Test 3: Aggregation Query (Should trigger SQL_QUERY)
+    generate_and_execute_query(
+        llm_client,
+        "What is the maximum applicant income for all loans?",
+        parquet_schema, 
+        df_sample,
+        dynamic_parquet_path,
+        excel_input_path
+    )
+    
+    # Test 4: Compound Filter Query (Should trigger SQL_QUERY)
+    generate_and_execute_query(
+        llm_client,
+        "How many loans have a credit score above 650 and are 'Approved'?",
+        parquet_schema, 
+        df_sample,
+        dynamic_parquet_path,
+        excel_input_path
+    )
+    
     print("\n--- Execution Complete ---")
 
 if __name__ == "__main__":
