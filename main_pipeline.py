@@ -7,7 +7,7 @@ from openai import AzureOpenAI
 import uuid
 from datetime import datetime
 from dotenv import load_dotenv
-from typing import Literal, Dict, Any, Tuple
+from typing import Literal, Tuple
 import time
 
 # NOTE: Ensure these imports point to your custom files
@@ -92,13 +92,17 @@ def get_parquet_context(parquet_path: str) -> Tuple[str, pd.DataFrame]:
 # -------------------------------------------------------------
 
 def convert_excel_to_parquet(input_path: str, output_path: str) -> None:
-    """Reads Excel, converts to Parquet, saves locally."""
+    """Reads Excel, converts to Parquet, saves locally, and frees memory."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     print(f"[INFO] Converting '{os.path.basename(input_path)}' to Parquet...")
     
     df = pd.read_excel(input_path, engine='openpyxl')
+    
     df.to_parquet(output_path, engine='pyarrow', compression='snappy', index=False)
     print(f"[SUCCESS] Parquet file saved at: {output_path}")
+    
+    del df
+    print("[INFO] Pandas DataFrame deleted from memory.")
 
 def execute_duckdb_query(query: str) -> pd.DataFrame:
     """Executes a SQL query against the local Parquet file using DuckDB."""

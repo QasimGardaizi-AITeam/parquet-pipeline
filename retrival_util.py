@@ -3,7 +3,7 @@ import sys
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from pymongo import MongoClient
-from typing import List, Dict, Any
+from typing import List, Dict
 
 # --- 1. Configuration and Initialization ---
 
