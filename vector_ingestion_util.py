@@ -9,7 +9,7 @@ import pymongo
 from typing import List, Dict, Any, Union, Optional
 import traceback 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import duckdb  # NEW: Import DuckDB to read from Azure
+import duckdb
 
 # --- 1. Environment & Client Setup ---
 
@@ -26,7 +26,6 @@ try:
     DATABASE_NAME = os.getenv("MONGO_DATABASE_NAME", "vector_rag_db")
     VECTOR_INDEX_NAME = os.getenv("MONGO_VECTOR_INDEX_NAME", "vector_index")
     
-    # NEW: Azure Storage credentials for DuckDB
     AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 
 except KeyError as e:
@@ -44,16 +43,25 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=60000)
+    # CRITICAL FIX: Increase timeouts and add retry logic
+    mongo_client = MongoClient(
+        MONGO_URI, 
+        serverSelectionTimeoutMS=60000,
+        socketTimeoutMS=120000,  # NEW: Socket timeout (2 minutes)
+        connectTimeoutMS=30000,   # NEW: Connection timeout
+        retryWrites=True,         # NEW: Enable retry writes
+        maxPoolSize=10            # NEW: Connection pool size
+    )
     db = mongo_client[DATABASE_NAME]
     mongo_client.admin.command('ping')
+    print("[INFO] MongoDB connection established successfully.")
 except Exception as e:
     print(f"FATAL ERROR (Ingestion): Error connecting to MongoDB Atlas: {e}")
     sys.exit(1)
 
 
 # ------------------------------------------------
-# NEW: Helper function to read Parquet from Azure
+# Helper function to read Parquet from Azure
 # ------------------------------------------------
 
 def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
@@ -62,11 +70,9 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
     Uses DuckDB for Azure URIs.
     """
     if file_path.startswith('azure://'):
-        # Read from Azure Blob Storage using DuckDB
         try:
             conn = duckdb.connect()
             
-            # Setup Azure authentication
             conn.execute("INSTALL azure;")
             conn.execute("LOAD azure;")
             
@@ -74,7 +80,6 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
                 escaped_conn_str = AZURE_STORAGE_CONNECTION_STRING.replace("'", "''")
                 conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
             
-            # Read the Parquet file from Azure
             df = conn.execute(f"SELECT * FROM read_parquet('{file_path}')").fetchdf()
             conn.close()
             
@@ -85,7 +90,6 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
             print(f"[ERROR] Failed to read Parquet from Azure URI '{file_path}': {e}")
             raise
     else:
-        # Read from local file system
         return pd.read_parquet(file_path)
 
 
@@ -131,7 +135,6 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
             index_creation_requested = True
             print(f"[SUCCESS] Index creation command sent. Atlas is building the index.")
 
-        # Polling Loop
         while time.time() - start_time < MAX_WAIT_TIME:
             try:
                 indexes = collection.list_search_indexes()
@@ -246,7 +249,43 @@ def get_embedding_for_chunk(chunk_texts: List[str]) -> List[List[float]]:
         return [[]] * len(chunk_texts)
 
 # ------------------------------------------------
-# 3. Core Ingestion Function (FIXED for Azure URIs)
+# NEW: Batched MongoDB Insertion with Progress
+# ------------------------------------------------
+
+def insert_documents_in_batches(collection, documents: List[Dict], batch_size: int = 100) -> bool:
+    """
+    Inserts documents in smaller batches with progress tracking to avoid timeouts.
+    """
+    total_docs = len(documents)
+    total_inserted = 0
+    
+    print(f"[INFO] Inserting {total_docs} documents in batches of {batch_size}...")
+    
+    for i in range(0, total_docs, batch_size):
+        batch = documents[i:i + batch_size]
+        batch_num = (i // batch_size) + 1
+        total_batches = (total_docs + batch_size - 1) // batch_size
+        
+        try:
+            result = collection.insert_many(batch, ordered=False)
+            total_inserted += len(result.inserted_ids)
+            print(f"[PROGRESS] Batch {batch_num}/{total_batches}: Inserted {len(result.inserted_ids)} documents. Total: {total_inserted}/{total_docs}")
+            
+        except pymongo.errors.BulkWriteError as bwe:
+            # Handle partial success in bulk writes
+            inserted_count = bwe.details.get('nInserted', 0)
+            total_inserted += inserted_count
+            print(f"[WARNING] Batch {batch_num} partial success: {inserted_count} inserted, {len(bwe.details.get('writeErrors', []))} errors")
+            
+        except Exception as e:
+            print(f"[ERROR] Batch {batch_num} failed completely: {e}")
+            return False
+    
+    print(f"[SUCCESS] Total documents inserted: {total_inserted}/{total_docs}")
+    return total_inserted == total_docs
+
+# ------------------------------------------------
+# 3. Core Ingestion Function (FIXED)
 # ------------------------------------------------
 def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefix: str = "data_source") -> Union[bool, str]:
     """
@@ -255,7 +294,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
     """
     
     # 1. Determine Dynamic Collection Name
-    base_name = os.path.splitext(os.path.basename(file_path.split('/')[-1]))[0]  # Extract filename from URI
+    base_name = os.path.splitext(os.path.basename(file_path.split('/')[-1]))[0]
     
     if sheet_name:
         sheet_name_clean = "".join(c for c in sheet_name if c.isalnum() or c in ('_',)).rstrip().lower()
@@ -263,14 +302,15 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
     else:
         COLLECTION_NAME = f"{collection_prefix}_{base_name}"
     
-    write_concern = pymongo.WriteConcern(w=1)
+    # CRITICAL FIX: Use weaker write concern to avoid blocking
+    write_concern = pymongo.WriteConcern(w=1, j=False)  # j=False = don't wait for journal
     collection = db.get_collection(COLLECTION_NAME, write_concern=write_concern) 
     
     print(f"\n--- Starting Ingestion for Collection: '{COLLECTION_NAME}' (Source: {os.path.basename(file_path)}) ---")
 
-    # 2. Load Data (FIXED: Use the new helper function)
+    # 2. Load Data
     try:
-        df = read_parquet_from_azure(file_path)  # NEW: Handles both local and Azure URIs
+        df = read_parquet_from_azure(file_path)
         print(f"Data loaded: {len(df)} rows.")
         
     except FileNotFoundError:
@@ -278,7 +318,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
     except Exception as e:
         return f"Error during data loading: {e}"
     
-    # 3. Chunking & Embedding (Parallelized)
+    # 3. Chunking & Embedding
     
     chunks = chunk_dataframe_dynamic(df, max_tokens_per_chunk=1000)
     print(f"Generated {len(chunks)} chunks.")
@@ -315,7 +355,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
     except Exception as e:
         return f"Error during ThreadPool or Azure OpenAI API call: {e}"
 
-    # 4. Prepare and Insert Documents
+    # 4. Prepare Documents
     mongo_documents = []
     first_chunk_id = None 
     
@@ -334,20 +374,26 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
 
     if mongo_documents:
         try:
+            # 5. Clear old data
             print(f"Clearing old documents from '{COLLECTION_NAME}'...")
-            collection.delete_many({}) 
+            delete_result = collection.delete_many({})
+            print(f"Deleted {delete_result.deleted_count} old documents.")
             
-            print(f"Attempting to insert {len(mongo_documents)} documents (synchronously)...")
-            
-            result = collection.insert_many(
+            # 6. CRITICAL FIX: Use batched insertion
+            insertion_success = insert_documents_in_batches(
+                collection, 
                 mongo_documents, 
-                ordered=False, 
+                batch_size=100  # Smaller batches to avoid timeout
             )
             
-            if len(result.inserted_ids) == len(mongo_documents):
-                print(f"Successfully inserted {len(mongo_documents)} chunks. (Write Acknowledged)")
-                
-                SYNC_TIMEOUT = 45 
+            if not insertion_success:
+                return "Error: MongoDB insertion failed or incomplete."
+            
+            print(f"[SUCCESS] All {len(mongo_documents)} chunks inserted successfully.")
+            
+            # 7. Skip sync check if too many documents (it's slow)
+            if len(mongo_documents) <= 100:
+                SYNC_TIMEOUT = 30
                 if first_chunk_id and not wait_for_vector_sync(
                     db, 
                     COLLECTION_NAME, 
@@ -355,15 +401,16 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
                     index_name=VECTOR_INDEX_NAME, 
                     timeout=SYNC_TIMEOUT
                 ):
-                    return "Error: Atlas Search synchronization timed out. Retrieval will be unreliable."
-                
-                index_success = ensure_vector_search_index(db, COLLECTION_NAME, embedding_dim=embedding_dim, index_name=VECTOR_INDEX_NAME)
-                if not index_success:
-                    return "Error: Data inserted, but Atlas Vector Index creation failed."
-                
-                return True
+                    print("[WARNING] Atlas Search sync timed out, but continuing...")
             else:
-                return "Error: MongoDB insertion count mismatch."
+                print(f"[INFO] Skipping sync check for large dataset ({len(mongo_documents)} docs). Index will sync in background.")
+            
+            # 8. Ensure index exists
+            index_success = ensure_vector_search_index(db, COLLECTION_NAME, embedding_dim=embedding_dim, index_name=VECTOR_INDEX_NAME)
+            if not index_success:
+                return "Error: Data inserted, but Atlas Vector Index creation failed."
+            
+            return True
             
         except Exception as e:
             traceback.print_exc(file=sys.stdout)

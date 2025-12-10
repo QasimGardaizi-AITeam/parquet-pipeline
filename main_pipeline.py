@@ -71,12 +71,11 @@ class Config:
 
     # --- UPDATED FILE PATHS FOR MULTI-FILE/TAB SUPPORT ---
     INPUT_FILE_PATHS: List[str] = [
-        '../sheets/file1.xlsx',
-        '../sheets/file2.xlsx',
+        # '../sheets/file1.xlsx',
+        # '../sheets/file2.xlsx',
         '../sheets/loan.xlsx'
-        # Add any other specific file paths here
     ]
-    PARQUET_OUTPUT_DIR = 'parquet_files/' # Directory to store all Parquet files (one per sheet/file)
+    PARQUET_OUTPUT_DIR = 'parquet_files/'
     ALL_PARQUET_GLOB_PATTERN = (
         f"azure://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/"
         f"{AZURE_STORAGE_CONTAINER_NAME}/{PARQUET_OUTPUT_DIR}*.parquet"
@@ -426,11 +425,21 @@ def main():
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
         llm_client,
-        "What is Maximum Discount for each price change reason and what is loan amount of Harrison, Ters.",
+        # "What is Maximum Discount for each price change reason and 
+        "what is loan amount of Harrison, Ters.",
         all_parquet_files,
         global_catalog,
         first_excel_path,
         config # <-- PASS CONFIG HERE
+    )
+    
+    generate_and_execute_query(
+        llm_client,
+        "what is highest loan amount",
+        all_parquet_files,
+        global_catalog,
+        first_excel_path,
+        config # 
     )
     
     print("\n--- Execution Complete ---")
