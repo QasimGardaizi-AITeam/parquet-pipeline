@@ -114,6 +114,5 @@ def get_semantic_context_for_query(query: str, file_name: str, collection_prefix
     full_context = "\n\n".join(context_list)
     
     print(f'-> SUCCESS: Semantic context retrieved (Score: {retrieved_docs[0]["score"]:.4f}). Context preview:')
-    print('context: ',full_context) 
     
     return full_context

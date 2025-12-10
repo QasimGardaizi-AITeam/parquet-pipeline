@@ -7,13 +7,20 @@ from openai import AzureOpenAI
 import uuid
 from datetime import datetime
 from dotenv import load_dotenv
-from typing import Literal, Tuple
+from typing import Literal, Tuple, List, Dict, Any
 import time
-
-# NOTE: Ensure retrival_util.py has the debugging print for context retrieval
+from concurrent.futures import ThreadPoolExecutor, as_completed 
 from retrival_util import get_semantic_context_for_query 
-# NOTE: Ensure vector_ingestion_util.py has the new wait_for_vector_sync logic
 from vector_ingestion_util import ingest_to_vector_db 
+
+# Placeholder/Fallback logic for decomposition_util
+try:
+    from decomposition_util import decompose_multi_intent_query 
+except ImportError:
+    def decompose_multi_intent_query(llm_client, user_question, deployment_name):
+        print("[WARNING] Using fallback decomposition. Create decomposition_util.py for full functionality.")
+        return [user_question] 
+    
 
 load_dotenv()
 
@@ -105,7 +112,6 @@ def execute_duckdb_query(query: str) -> pd.DataFrame:
         conn.close()
         return result_df
     except Exception as e:
-        print(f"[ERROR] DuckDB query execution failed: {e}")
         return pd.DataFrame({'Error': [str(e)]})
 
 # 3. LLM ROUTER & CORE RAG FUNCTION
@@ -117,9 +123,7 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
 
     ROUTER_SYSTEM_PROMPT = f"""
         You are an intelligent routing agent. Your task is to classify the user's question based on the provided database context.
-
         --- DATABASE CONTEXT ---
-        
         SCHEMA:
         {schema}
         
@@ -127,10 +131,8 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
         {df_sample.to_markdown(index=False)}
         
         --- CLASSIFICATION RULES ---
-        
-        1. **SEMANTIC_SEARCH**: Choose this intent if the query involves: fuzzy matching, potentially misspelled names (like 'Smithe'), or conceptual descriptions that require vector similarity (like 'high value collateral'). This path needs context retrieval (RAG).
-        
-        2. **SQL_QUERY**: Choose this intent if the query involves: direct calculations, aggregation functions (SUM, AVG, COUNT, MIN, MAX), or precise filtering on structured numeric or categorical columns (like 'credit_score > 750' or 'loan_status = Approved'). This path can be solved directly via SQL generation.
+        1. **SEMANTIC_SEARCH**: Choose this intent if the query involves: fuzzy matching, potentially misspelled names (like 'Smithe'), or conceptual descriptions that require vector similarity (like 'high value collateral'). 
+        2. **SQL_QUERY**: Choose this intent if the query involves: direct calculations, aggregation functions (SUM, AVG, COUNT, MIN, MAX), or precise filtering on structured numeric or categorical columns.
 
         Your output MUST be a single JSON object with the key 'intent'.
         Example: {{"intent": "SEMANTIC_SEARCH"}}
@@ -151,53 +153,38 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
         return intent if intent in ['SEMANTIC_SEARCH', 'SQL_QUERY'] else 'SQL_QUERY'
             
     except Exception as e:
-        print(f"[ERROR] LLM Router failed: {e}. Defaulting to SQL_QUERY.")
         return 'SQL_QUERY'
 
 
-def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame, parquet_path: str, excel_path: str):
+def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame, parquet_path: str, excel_path: str) -> Tuple[str, pd.DataFrame, float, str]:
     """
-    Hybrid RAG: Router -> Conditional Pipeline -> SQL Generation -> DuckDB Execution.
+    CORE WORKER: Processes a single, atomic query through the Hybrid RAG pipeline.
+    This function contains the logic for routing, RAG lookup, SQL generation, and execution.
     """
-    if not llm_client: return pd.DataFrame({'Error': ["LLM client not initialized."]})
-
-    print(f"\n\n--- Processing Query ---")
-    print(f"User Question: '{user_question}'")
     
     start_time = time.time()
     
+    # 1. Routing
     intent = route_query_intent(llm_client, user_question, schema, df_sample)
-    
-    print(f"-> STEP 1: Router Decision: **{intent}**")
     
     AUGMENTATION_HINT = ""
     semantic_lookup_duration = 0
 
+    # 2. RAG Lookup (if needed)
     if intent == 'SEMANTIC_SEARCH':
         lookup_start = time.time()
-        # The excel_path is passed as 'file_name' because the ingestion utility uses it 
-        # to derive the MongoDB collection name (e.g., data_source_loan)
-        print(f"-> STEP 2: Executing SEMANTIC SEARCH pipeline (using '{excel_path}' for context lookup)...")
-        
+        # The retrival_util is correctly used here
         semantic_context = get_semantic_context_for_query(user_question, file_name=excel_path, limit=7) 
         semantic_lookup_duration = time.time() - lookup_start
         
         if semantic_context:
             AUGMENTATION_HINT = (
                 "\n*** CONTEXTUAL SAMPLE DATA HINT (Retrieved via Semantic Search): ***\n"
-                "This data is highly relevant to the user's question for fuzzy names/terms. "
-                "Find all values that match or almost match the user query"
-                "You MUST use the EXACT values found here to construct a precise `WHERE...IN (...)` clause. "
                 f"{semantic_context}\n"
                 "*** END HINT ***\n"
             )
-            print("-> Context found. Prompt will be augmented.")
-        else:
-            print("-> WARNING: Semantic search failed to find context. Relying solely on schema.")
             
-    else:
-        print("-> STEP 2: Executing DIRECT SQL pipeline. No vector search needed.")
-
+    # 3. SQL Generation System Prompt
     SYSTEM_PROMPT = f"""
         You are an expert SQL Generator optimized for DuckDB. Your task is to translate a user's question into a single, valid, executable SQL query.
 
@@ -213,22 +200,14 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
         -- End of Sample Data --
 
         {AUGMENTATION_HINT} 
-
+        
         **CRITICAL RULES FOR SQL GENERATION:**
-
         1. **STRICTLY USE ONLY THE COLUMN NAMES** found in the "DYNAMIC DATABASE SCHEMA".
-        2. **STRICTLY USE ONLY THE TABLE NAME** implied by the 'read_parquet' function.
-
-        3. **SEMANTIC FILTERING (RAG):** If the **CONTEXTUAL SAMPLE DATA HINT** is present, and the user's query references a specific entity (name, ID, or fuzzy term), you **MUST** use the exact, canonical values from the hint to form a precise `WHERE...IN (...)` clause. Do not invent names or values.
-
-        4. **CONTEXTUAL INFERENCE (Filtering Logic):** When the user query involves a filter based on common categories (e.g., location/State/City, Date, Amount, Applicant Name), you **MUST** analyze the DYNAMIC DATABASE SCHEMA and SAMPLE DATA to identify the most appropriate column for filtering.
-        - **Example:** For a query like "loans in New York", identify the column name that clearly represents location (e.g., `state`, `city`, `location`, or `address`), and **NEVER** use a column clearly designed for personal identification (like an `applicant_name` or `ID` column) for a location filter.
-        - **Example:** For filtering by time, identify the column with the date/datetime type.
-
-        5. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query. Do not include any explanations, comments, or surrounding Markdown formatting (e.g., ```sql`).
+        2. **SEMANTIC FILTERING (RAG):** If the **CONTEXTUAL SAMPLE DATA HINT** is present, you **MUST** use the exact, canonical values from the hint to form a precise `WHERE...IN (...)` clause. 
+        3. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query.
         """
 
-    print("-> STEP 3: Calling LLM to generate SQL...")
+    # 4. Call LLM for SQL
     response = llm_client.chat.completions.create(
         model=Config.LLM_DEPLOYMENT_NAME,
         messages=[
@@ -239,32 +218,95 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, sche
     )
     sql_query = response.choices[0].message.content.strip()
     
-    # Clean up common LLM code block wrappers
+    # Clean up
     if sql_query.lower().startswith("```sql"):
         sql_query = sql_query[len("```sql"):].strip()
     if sql_query.endswith("```"):
         sql_query = sql_query[:-len("```")].strip()
-
-    print(f"-> Generated SQL: {sql_query}")
         
-    print("-> STEP 4: Executing DuckDB query...")
+    # 5. Execute DuckDB Query
     result_df = execute_duckdb_query(sql_query)
 
-    end_time = time.time()
-    total_duration = end_time - start_time
-    print(f"--- Query Finished in {total_duration:.2f} seconds (Semantic lookup: {semantic_lookup_duration:.2f}s) ---")
+    total_duration = time.time() - start_time
     
-    if not result_df.empty and 'Error' not in result_df.columns:
-        print("\nQuery Result:")
-        print(result_df.to_markdown(index=False))
-    elif 'Error' in result_df.columns:
-        print(f"\n[EXECUTION ERROR] {result_df['Error'].iloc[0]}")
+    # Return all necessary results for the main handler
+    return user_question, result_df, total_duration, intent
+
+
+def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame, parquet_path: str, excel_path: str) -> Dict[str, pd.DataFrame]:
+    """
+    REFACED: Handles multi-intent queries by decomposition and parallel execution.
+    Orchestrates the new multi-topic flow.
+    """
+    # FIX: Corrected the syntax for the error return (lines 251, 38, 39 in the error report)
+    if not llm_client: 
+        return {
+            "ORCHESTRATION_FAILURE": pd.DataFrame({
+                'Error': ["FATAL: LLM client not initialized. Cannot proceed with decomposition or query generation."]
+            })
+        }
+
+    print("\n" + "="*80)
+    print(f"       *** ORCHESTRATION START: '{user_question}' ***")
+    print("="*80)
+    
+    overall_start_time = time.time()
+    
+    # 1. DECOMPOSITION
+    sub_queries = decompose_multi_intent_query(llm_client, user_question, Config.LLM_DEPLOYMENT_NAME)
+    
+    if len(sub_queries) == 1 and sub_queries[0] == user_question:
+        print("-> Single-Topic Flow Detected or Decomposition Fallback. Executing sequentially.")
     else:
-        print("[WARNING] Query executed but returned no results.")
+        print(f"-> Multi-Topic Flow Detected. Sub-queries: {sub_queries}")
+        print("-> Executing sub-queries concurrently using ThreadPoolExecutor...")
+        
 
-    return result_df
+    final_combined_results: Dict[str, pd.DataFrame] = {}
+    
+    # 2. PARALLEL EXECUTION (Async Flow for I/O-bound tasks) 
+    with ThreadPoolExecutor(max_workers=min(len(sub_queries), 5)) as executor: 
+        
+        # Prepare tasks for submission
+        future_to_query = {
+            executor.submit(
+                process_single_query, 
+                llm_client, sub_query, schema, df_sample, parquet_path, excel_path
+            ): sub_query for sub_query in sub_queries
+        }
 
-# 4. MAIN EXECUTION
+        # Collect results
+        for future in as_completed(future_to_query):
+            query_text = future_to_query[future]
+            try:
+                # Unpack the tuple from the worker function
+                _, result_df, duration, intent = future.result() 
+                
+                final_combined_results[query_text] = result_df
+                
+                print(f"\n--- Result for Query: '{query_text}' ---")
+                print(f"  Intent: **{intent}** | Duration: {duration:.2f}s")
+                if not result_df.empty and 'Error' not in result_df.columns:
+                    print("\nQuery Result:")
+                    print(result_df.head().to_markdown(index=False)) 
+                    if len(result_df) > 5:
+                        print(f"... and {len(result_df) - 5} more rows.")
+                elif 'Error' in result_df.columns:
+                    print(f"[EXECUTION ERROR] {result_df['Error'].iloc[0]}")
+                else:
+                    print("[WARNING] Query executed but returned no results.")
+                
+            except Exception as exc:
+                print(f"\n[CRITICAL ERROR] Sub-query processing failed for '{query_text}': {exc}")
+                final_combined_results[query_text] = pd.DataFrame({'Error': [str(exc)]})
+                
+    overall_duration = time.time() - overall_start_time
+    print("\n" + "="*80)
+    print(f"       *** ORCHESTRATION COMPLETE in {overall_duration:.2f} seconds ***")
+    print("="*80)
+
+    return final_combined_results
+
 def main():
     
     Config.validate_env()
@@ -284,16 +326,13 @@ def main():
 
     try:
         convert_excel_to_parquet(excel_input_path, dynamic_parquet_path)
-        # CRITICAL: Use the excel_input_path (source file name) for ingestion
-        # so it can determine the collection name (e.g., data_source_loan)
+        # ingest_to_vector_db is called here, relying on the top-level import
         ingestion_status = ingest_to_vector_db(excel_input_path) 
         
         if ingestion_status is True:
             print("\n[SUCCESS] Vector DB is up-to-date with the latest data.")
         else:
-            # Prints the detailed error message from the ingest_to_vector_db return value
             print(f"\n[WARNING] Vector DB Ingestion Failed: {ingestion_status}. Semantic search will be unreliable.")
-            # Do not exit, continue with SQL-only path
             
     except Exception as e:
         print(f"\n[FATAL] Pipeline failed during file processing: {e}")
@@ -312,10 +351,10 @@ def main():
     print("### STARTING EXECUTION ###")
     print("#"*50)
     
-    # Test 1: Fuzzy Name Match (Should trigger SEMANTIC_SEARCH and utilize the RAG sync fix)
+    # Multi-Intent Test Case: A mix of fuzzy name match (SEMANTIC) and aggregation (SQL)
     generate_and_execute_query(
         llm_client,
-        "Find the details for the client named Kathleen Vasqez.",
+        "What is the maximum income for all loans and what are the details for the client Kathleen Vasqez?",
         parquet_schema, 
         df_sample,
         dynamic_parquet_path,
@@ -323,36 +362,14 @@ def main():
     )
     
     
-    # Test 2: Fuzzy Name Match (Should trigger SEMANTIC_SEARCH and utilize the RAG sync fix)
     generate_and_execute_query(
         llm_client,
-        "What is credit Score of Harrison, Teresa.",
+        "Find all Auto loan applicants and list their approval status and interest rates.",
         parquet_schema, 
         df_sample,
         dynamic_parquet_path,
         excel_input_path
     )
-    
-    # Test 3: Aggregation Query (Should trigger SQL_QUERY)
-    generate_and_execute_query(
-        llm_client,
-        "What is the maximum applicant income for all loans?",
-        parquet_schema, 
-        df_sample,
-        dynamic_parquet_path,
-        excel_input_path
-    )
-    
-    # Test 4: Compound Filter Query (Should trigger SQL_QUERY)
-    generate_and_execute_query(
-        llm_client,
-        "How many loans have a credit score above 650 and are 'Approved'?",
-        parquet_schema, 
-        df_sample,
-        dynamic_parquet_path,
-        excel_input_path
-    )
-    
     print("\n--- Execution Complete ---")
 
 if __name__ == "__main__":
