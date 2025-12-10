@@ -8,6 +8,7 @@ from pymongo import MongoClient
 import pymongo 
 from typing import List, Dict, Any, Union, Optional
 import traceback 
+from concurrent.futures import ThreadPoolExecutor, as_completed # Import for parallel embedding
 
 # --- 1. Environment & Client Setup ---
 
@@ -189,21 +190,26 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
         })
     return chunks
 
+
+def get_embedding_for_chunk(chunk_texts: List[str]) -> List[List[float]]:
+    """Worker function to get embeddings for a batch of chunk texts."""
+    try:
+        response = openai_client.embeddings.create(
+            model=AZURE_DEPLOYMENT_NAME,
+            input=chunk_texts,
+        )
+        return [data.embedding for data in response.data]
+    except Exception as e:
+        print(f"[EMBEDDING ERROR] Failed to embed batch: {e}")
+        return [[]] * len(chunk_texts) # Return empty embeddings on failure
+
 # ------------------------------------------------
 # 3. Core Ingestion Function (Updated for Multi-Source)
 # ------------------------------------------------
 def ingest_to_vector_db(file_path: str, sheet_name: str, collection_prefix: str = "data_source") -> Union[bool, str]:
     """
     Loads data from the given Parquet file (representing a unique logical table/sheet), 
-    chunks, embeds, and inserts into a uniquely named MongoDB Atlas Collection.
-    
-    Args:
-        file_path (str): The path to the Parquet file to ingest.
-        sheet_name (str): The name of the sheet/tab, used for unique collection naming.
-        collection_prefix (str): Prefix for the MongoDB collection name.
-        
-    Returns:
-        Union[bool, str]: True on success, or an error string on failure.
+    chunks, embeds (in parallel), and inserts into a uniquely named MongoDB Atlas Collection.
     """
     
     # 1. Determine Dynamic Collection Name and Collection Object
@@ -214,7 +220,8 @@ def ingest_to_vector_db(file_path: str, sheet_name: str, collection_prefix: str 
     COLLECTION_NAME = f"{collection_prefix}_{base_name}" 
     
     write_concern = pymongo.WriteConcern(w=1)
-    collection = db.get_collection(COLLECTION_NAME, write_concern=write_concern)
+    # NOTE: The pymongo.MongoClient is thread-safe and can be reused across threads.
+    collection = db.get_collection(COLLECTION_NAME, write_concern=write_concern) 
     
     print(f"\n--- Starting Ingestion for Collection: '{COLLECTION_NAME}' (Source: {os.path.basename(file_path)}) ---")
 
@@ -231,23 +238,48 @@ def ingest_to_vector_db(file_path: str, sheet_name: str, collection_prefix: str 
     except Exception as e:
         return f"Error during data loading: {e}"
     
-    # 3. Chunking & Embedding
+    # 3. Chunking & Embedding (Parallelized)
+    
+    # a. Chunking
     chunks = chunk_dataframe_dynamic(df, max_tokens_per_chunk=1000)
     print(f"Generated {len(chunks)} chunks.")
     chunk_texts = [c["text"] for c in chunks]
 
-    print(f"Starting vector embedding using Azure Deployment: {AZURE_DEPLOYMENT_NAME}...")
+    # b. Parallel Embedding using ThreadPoolExecutor
+    print(f"Starting parallel vector embedding using Azure Deployment: {AZURE_DEPLOYMENT_NAME}...")
+    
+    # Split chunks into batches for concurrent API calls (OpenAI limit is 2048/batch)
+    # Using a smaller batch size to maximize concurrency, e.g., 200 chunks per batch/thread
+    BATCH_SIZE = 200 
+    MAX_THREADS = 8 # Limit threads to manage rate limits
+    text_batches = [chunk_texts[i:i + BATCH_SIZE] for i in range(0, len(chunk_texts), BATCH_SIZE)]
+    
+    all_embeddings = []
+    embedding_start_time = time.time()
+    
     try:
-        response = openai_client.embeddings.create(
-            model=AZURE_DEPLOYMENT_NAME,
-            input=chunk_texts,
-        )
-        chunk_embeddings = [data.embedding for data in response.data]
-        embedding_dim = len(chunk_embeddings[0]) 
-        print(f"Embedding complete. Vector dimension: {embedding_dim}")
+        with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+            future_to_batch = {
+                executor.submit(get_embedding_for_chunk, batch): batch
+                for batch in text_batches
+            }
+            
+            # Collect results in order of completion
+            for future in as_completed(future_to_batch):
+                batch_embeddings = future.result()
+                all_embeddings.extend(batch_embeddings)
+                
+        embedding_duration = time.time() - embedding_start_time
+        
+        if not all_embeddings or any(not e for e in all_embeddings):
+             # Check if any embedding failed (returned [])
+             return f"Error during parallel embedding: One or more batches failed to return embeddings. Duration: {embedding_duration:.2f}s"
+             
+        embedding_dim = len(all_embeddings[0]) 
+        print(f"Embedding complete ({len(all_embeddings)} vectors) in {embedding_duration:.2f}s. Vector dimension: {embedding_dim}")
 
     except Exception as e:
-        return f"Error during Azure OpenAI API call: {e}"
+        return f"Error during ThreadPool or Azure OpenAI API call: {e}"
 
     # 4. Prepare and Insert Documents
     mongo_documents = []
@@ -262,7 +294,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str, collection_prefix: str 
             "_id": doc_id, 
             "text": chunk["text"],
             "metadata": {**chunk["metadata"], "source_file": os.path.basename(file_path)}, # Add source file to metadata
-            "embedding": chunk_embeddings[i]
+            "embedding": all_embeddings[i] # Use the parallelized embedding
         }
         mongo_documents.append(mongo_doc)
 
@@ -283,7 +315,6 @@ def ingest_to_vector_db(file_path: str, sheet_name: str, collection_prefix: str 
                 print(f"Successfully inserted {len(mongo_documents)} chunks. (Write Acknowledged)")
                 
                 # --- ATLAS SEARCH SYNC CHECK ---
-                # The Sync timeout is now correctly passed as a keyword argument
                 SYNC_TIMEOUT = 30 
                 if first_chunk_id and not wait_for_vector_sync(
                     db, 

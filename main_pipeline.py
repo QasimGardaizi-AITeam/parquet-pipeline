@@ -91,33 +91,69 @@ def setup_llm_client():
 def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = False) -> Tuple[str, pd.DataFrame]:
     """
     Dynamically gets the combined schema and top 5 rows from a list of Parquet files.
-    The union_by_name flag is now explicit and controlled by the orchestrator.
+    Handles JOIN (separate schemas) vs. UNION (combined schema).
+    
+    Args:
+        parquet_paths (List[str]): List of Parquet file paths.
+        use_union_by_name (bool): True for UNION mode (combining all columns), False for JOIN mode (separate tables).
+
+    Returns:
+        Tuple[str, pd.DataFrame]: The schema context string and sample data.
     """
     try:
         if not parquet_paths:
              return "TABLE SCHEMA: No Parquet files specified.", pd.DataFrame()
         
-        # Format the list of paths for DuckDB's read_parquet
-        paths_str = ', '.join(f"'{p}'" for p in parquet_paths)
-        union_flag = ", union_by_name=true" if use_union_by_name else ""
-        
         conn = duckdb.connect()
-        
-        # Build the initial query string
-        query = f"SELECT * FROM read_parquet([{paths_str}]{union_flag})"
-        
-        # 1. Get Schema
-        schema_df = conn.execute(f"DESCRIBE {query}").fetchdf()
-        
-        schema_lines = [f"Column: {row['column_name']} ({row['column_type']})" 
-                        for index, row in schema_df.iterrows()]
-        schema_header = "TABLE SCHEMA (UNIONED)" if use_union_by_name else "TABLE SCHEMA"
-        schema_string = f"{schema_header}:\n" + "\n".join(schema_lines)
-        
-        # 2. Get Sample Data
-        df_sample = conn.execute(f"{query} LIMIT 5").fetchdf()
+        schema_string = ""
+        df_sample = pd.DataFrame()
+
+        if use_union_by_name:
+            # --- UNION MODE (Original Logic - Valid Syntax) ---
+            paths_str = ', '.join(f"'{p}'" for p in parquet_paths)
+            union_flag = ", union_by_name=true"
+            # Query the unified view
+            query = f"SELECT * FROM read_parquet([{paths_str}]{union_flag})"
+            
+            # Describe the result of the query
+            schema_df = conn.execute(f"DESCRIBE {query}").fetchdf()
+            
+            schema_lines = [f"Column: {row['column_name']} ({row['column_type']})" 
+                            for index, row in schema_df.iterrows()]
+            schema_string = f"TABLE SCHEMA (UNIONED):\n" + "\n".join(schema_lines)
+            
+            # Get Sample Data from the unified view
+            df_sample = conn.execute(f"{query} LIMIT 5").fetchdf()
+            
+        else:
+            # --- JOIN MODE (New Logic - Corrected DuckDB Syntax) ---
+            # Describe each table separately for the LLM context
+            
+            all_schema_lines = ["TABLE SCHEMAS (JOIN MODE)"]
+            
+            for i, p_path in enumerate(parquet_paths):
+                logical_name = os.path.splitext(os.path.basename(p_path))[0]
+                alias = f"T{i+1}"
+                
+                # --- CRITICAL FIX: Wrap read_parquet in (SELECT * FROM ...) for DESCRIBE ---
+                describe_query = f"DESCRIBE (SELECT * FROM read_parquet('{p_path}'))" 
+                
+                # Get schema for the single file
+                schema_df = conn.execute(describe_query).fetchdf()
+                
+                all_schema_lines.append(f"\n--- LOGICAL TABLE: {logical_name} (Alias: {alias}) ---")
+                
+                col_lines = [f"Column: {row['column_name']} ({row['column_type']})" 
+                             for index, row in schema_df.iterrows()]
+                all_schema_lines.extend(col_lines)
+
+            schema_string = "\n".join(all_schema_lines)
+            
+            # For sample data in JOIN mode, just show a sample of the first file or an empty frame
+            if parquet_paths:
+                 df_sample = conn.execute(f"SELECT * FROM read_parquet('{parquet_paths[0]}') LIMIT 5").fetchdf()
+                 
         conn.close()
-        
         return schema_string, df_sample
         
     except Exception as e:
