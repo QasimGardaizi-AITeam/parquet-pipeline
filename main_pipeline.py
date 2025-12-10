@@ -3,6 +3,7 @@ import os
 import sys
 import json
 from openai import AzureOpenAI
+import atexit
 import uuid
 from datetime import datetime
 from dotenv import load_dotenv
@@ -368,6 +369,16 @@ def main():
     Config.validate_env()
     config = Config() # Instantiate the config object here
     
+    try:
+        from duckdb_util import setup_duckdb_azure_connection, close_persistent_duckdb_connection
+        # 1. Authenticate once at the start
+        setup_duckdb_azure_connection(config) 
+        # 2. Register a cleanup function to close the connection on exit
+        atexit.register(close_persistent_duckdb_connection) 
+    except Exception as e:
+        print(f"[FATAL] Initial DuckDB authentication failed: {e}")
+        sys.exit(1)
+        
     llm_client = setup_llm_client()
     if not llm_client: sys.exit(1)
 

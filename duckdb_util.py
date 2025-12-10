@@ -5,6 +5,7 @@ from typing import List, Tuple, Any
 import glob
 import sys 
 from azure.storage.blob import BlobServiceClient 
+import atexit 
 
 # Placeholder/Fallback for vector_ingestion_util
 try:
@@ -14,27 +15,48 @@ except ImportError:
         print(f"[WARNING] Using internal fallback ingestion for {file_path}.")
         return True
 
-# --- FIXED AZURE CONNECTION SETUP ---
+# --- NEW: Global variable to store the persistent connection ---
+PERSISTENT_DUCKDB_CONN = None
 
-def setup_duckdb_azure_connection(conn: duckdb.DuckDBPyConnection, config: Any):
-    """Initializes DuckDB extensions and sets Azure Blob Storage credentials."""
+# -----------------------------------------------
+# 1. CORE DUCKDB UTILITIES (MODIFIED FOR PERSISTENCE)
+# -----------------------------------------------
+
+def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
+    """
+    Initializes a NEW DuckDB connection, sets Azure Blob Storage credentials,
+    and returns the connection object. It caches the connection globally for reuse.
+    """
+    global PERSISTENT_DUCKDB_CONN
+    
+    if PERSISTENT_DUCKDB_CONN is not None:
+        # Connection already established and authenticated
+        # print("[INFO] Reusing existing persistent DuckDB connection.") # Suppress for cleaner logs
+        return PERSISTENT_DUCKDB_CONN
+
     try:
+        # Create the connection
+        conn = duckdb.connect()
+        
         # 1. Install and Load Azure Extension
         conn.execute("INSTALL azure;")
         conn.execute("LOAD azure;")
         
-        # 2. Set Credentials using Connection String (CORRECT METHOD)
+        # 2. Set Credentials using Connection String
         connection_string = config.AZURE_STORAGE_CONNECTION_STRING
         
         if connection_string:
-            print(f"[INFO] Configuring DuckDB Azure connection for storage: {config.AZURE_STORAGE_ACCOUNT_NAME}")
+            print(f"[INFO] Configuring persistent DuckDB Azure connection for storage: {config.AZURE_STORAGE_ACCOUNT_NAME}")
             
-            # CORRECT: Use the azure_storage_connection_string parameter
             # Escape single quotes in the connection string by doubling them
             escaped_conn_str = connection_string.replace("'", "''")
             conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
             
-            print("[SUCCESS] DuckDB Azure authentication configured successfully.")
+            print("[SUCCESS] Persistent DuckDB Azure authentication configured successfully.")
+            
+            # Store the connection globally for reuse
+            PERSISTENT_DUCKDB_CONN = conn
+            return conn
         else:
             print("[CRITICAL ERROR] DuckDB Azure connection failed: Missing AZURE_STORAGE_CONNECTION_STRING in config.")
             raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
@@ -42,56 +64,34 @@ def setup_duckdb_azure_connection(conn: duckdb.DuckDBPyConnection, config: Any):
     except Exception as e:
         import traceback
         traceback.print_exc(file=sys.stdout)
-        print(f"[CRITICAL ERROR] Failed to set up DuckDB Azure connection: {e}")
+        print(f"[CRITICAL ERROR] Failed to set up DuckDB connection: {e}")
+        # Ensure the global connection is None on failure
+        PERSISTENT_DUCKDB_CONN = None 
         raise  # Re-raise to stop execution if auth fails
-        
-def get_blob_uri(file_name: str, config: Any) -> str:
-    """Constructs the full Azure Blob Storage URI for a given file name."""
-    account = config.AZURE_STORAGE_ACCOUNT_NAME
-    container = config.AZURE_STORAGE_CONTAINER_NAME
-    return f"azure://{account}.blob.core.windows.net/{container}/{config.PARQUET_OUTPUT_DIR}{file_name}"
 
-def upload_file_to_azure(local_path: str, remote_file_path: str, config: Any) -> str:
-    """
-    Uploads a local file to Azure Blob Storage using the SDK.
-    Returns the full Azure URI on success.
-    """
-    try:
-        connection_string = config.AZURE_STORAGE_CONNECTION_STRING
-        container_name = config.AZURE_STORAGE_CONTAINER_NAME
+def close_persistent_duckdb_connection():
+    """Closes the globally stored DuckDB connection."""
+    global PERSISTENT_DUCKDB_CONN
+    if PERSISTENT_DUCKDB_CONN:
+        print("[INFO] Closing persistent DuckDB connection.")
+        PERSISTENT_DUCKDB_CONN.close()
+        PERSISTENT_DUCKDB_CONN = None
 
-        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
-        container_client = blob_service_client.get_container_client(container_name)
-        
-        blob_path = f"{config.PARQUET_OUTPUT_DIR}{remote_file_path}"
-        
-        print(f"[INFO] Uploading {os.path.basename(local_path)} to Azure Blob: {blob_path}")
+# Register the cleanup function to be called on program exit
+atexit.register(close_persistent_duckdb_connection)
 
-        with open(local_path, "rb") as data:
-            container_client.upload_blob(name=blob_path, data=data, overwrite=True)
-            
-        return get_blob_uri(remote_file_path, config)
-
-    except Exception as e:
-        raise Exception(f"Azure Upload Failed for {local_path}: {e}")
-
-# -----------------------------------------------
-# 1. CORE DUCKDB UTILITIES (MODIFIED FOR AZURE)
-# -----------------------------------------------
 
 def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = False, all_parquet_glob_pattern: str = None, config: Any = None) -> Tuple[str, pd.DataFrame]:
     """
-    Dynamically gets the combined schema and top 5 rows from a list of Parquet URIs/Paths.
+    Dynamically gets the combined schema and top 5 rows from a list of Parquet URIs/Paths
+    using the persistent DuckDB connection.
     """
     try:
         if not parquet_paths:
             return "TABLE SCHEMA: No Parquet files specified.", pd.DataFrame()
         
-        conn = duckdb.connect()
-        
-        # CRITICAL: Setup Azure connection before any DuckDB storage operation
-        if config:
-            setup_duckdb_azure_connection(conn, config)
+        # 1. Get the persistent connection (will connect and authenticate if needed)
+        conn = setup_duckdb_azure_connection(config)
 
         schema_string = ""
         df_sample = pd.DataFrame()
@@ -136,7 +136,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
             if parquet_paths:
                 df_sample = conn.execute(f"SELECT * FROM read_parquet('{parquet_paths[0]}') LIMIT 5").fetchdf()
                  
-        conn.close()
+        # NOTE: Connection remains open
         return schema_string, df_sample
         
     except Exception as e:
@@ -145,14 +145,13 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
 
 
 def execute_duckdb_query(query: str, config: Any) -> pd.DataFrame:
-    """Executes a SQL query against the Azure Parquet files using DuckDB."""
+    """Executes a SQL query against the Azure Parquet files using the persistent DuckDB connection."""
     try:
-        conn = duckdb.connect()
-        # CRITICAL: Setup Azure connection
-        setup_duckdb_azure_connection(conn, config)
+        # 1. Get the persistent connection
+        conn = setup_duckdb_azure_connection(config)
         
         result_df = conn.execute(query).fetchdf()
-        conn.close()
+        # NOTE: Connection remains open
         return result_df
     except Exception as e:
         return pd.DataFrame({'Error': [str(e)]})
@@ -178,7 +177,12 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     LOCAL_TEMP_DIR = "/tmp/parquet_cache"
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
     
-    conn = duckdb.connect()
+    # 1. Get connection (will connect and authenticate if needed)
+    try:
+        conn = setup_duckdb_azure_connection(config)
+    except Exception as e:
+        print(f"[ERROR] Could not set up DuckDB connection for Parquet writing: {e}")
+        return []
 
     for sheet_name, df in excel_sheets.items():
         safe_sheet_name = "".join(c for c in sheet_name if c.isalnum() or c in (' ', '_')).rstrip()
@@ -195,7 +199,7 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
             conn.execute(f"COPY temp_df TO '{local_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD);")
             conn.unregister('temp_df')
 
-            # 2. Upload the local file to Azure Blob Storage using the SDK
+            # 2. Upload the local file to Azure Blob Storage using the SDK (Function from duckdb_util)
             azure_uri = upload_file_to_azure(local_temp_path, remote_file_name, config)
             
             # 3. Trigger ingestion to vector DB, passing the Azure URI
@@ -210,18 +214,47 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
         except Exception as e:
             print(f"[ERROR] Failed to convert/upload sheet '{sheet_name}': {e}")
             
-    conn.close()
+    # NOTE: Connection remains open
     print(f"[SUCCESS] {len(azure_uris)} Parquet files created and ingested from {os.path.basename(input_path)}.")
     return azure_uris
+
+def get_blob_uri(file_name: str, config: Any) -> str:
+    """Constructs the full Azure Blob Storage URI for a given file name."""
+    account = config.AZURE_STORAGE_ACCOUNT_NAME
+    container = config.AZURE_STORAGE_CONTAINER_NAME
+    return f"azure://{account}.blob.core.windows.net/{container}/{config.PARQUET_OUTPUT_DIR}{file_name}"
+
+def upload_file_to_azure(local_path: str, remote_file_path: str, config: Any) -> str:
+    """
+    Uploads a local file to Azure Blob Storage using the SDK.
+    Returns the full Azure URI on success.
+    """
+    try:
+        connection_string = config.AZURE_STORAGE_CONNECTION_STRING
+        container_name = config.AZURE_STORAGE_CONTAINER_NAME
+
+        blob_service_client = BlobServiceClient.from_connection_string(connection_string)
+        container_client = blob_service_client.get_container_client(container_name)
+        
+        blob_path = f"{config.PARQUET_OUTPUT_DIR}{remote_file_path}"
+        
+        # print(f"[INFO] Uploading {os.path.basename(local_path)} to Azure Blob: {blob_path}")
+
+        with open(local_path, "rb") as data:
+            container_client.upload_blob(name=blob_path, data=data, overwrite=True)
+            
+        return get_blob_uri(remote_file_path, config)
+
+    except Exception as e:
+        raise Exception(f"Azure Upload Failed for {local_path}: {e}")
 
 
 def build_global_catalog(parquet_files: List[str], config: Any) -> str:
     """Generates a simplified, LLM-readable catalog of all available logical tables."""
     catalog = []
     
-    conn = duckdb.connect()
-    # CRITICAL: Setup Azure connection
-    setup_duckdb_azure_connection(conn, config)
+    # 1. Get the persistent connection
+    conn = setup_duckdb_azure_connection(config)
 
     for p_path in parquet_files:
         logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0]
@@ -232,5 +265,5 @@ def build_global_catalog(parquet_files: List[str], config: Any) -> str:
         except Exception as e:
             catalog.append(f"Logical Table: {logical_name} (ERROR: Failed to read schema: {e})")
 
-    conn.close()
+    # NOTE: Connection remains open
     return "\n".join(catalog)
