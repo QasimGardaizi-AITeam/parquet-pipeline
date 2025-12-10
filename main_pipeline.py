@@ -4,8 +4,8 @@ import sys
 import json
 from openai import AzureOpenAI
 import atexit
-import uuid
-from datetime import datetime
+# import uuid
+# from datetime import datetime
 from dotenv import load_dotenv
 from typing import Literal, Tuple, List, Dict
 import time
@@ -18,7 +18,9 @@ try:
         get_parquet_context,
         convert_excel_to_parquet,
         build_global_catalog,
-        execute_duckdb_query
+        execute_duckdb_query,
+        setup_duckdb_azure_connection, 
+        close_persistent_duckdb_connection
     )
 except ImportError:
     print("[FATAL] Missing duckdb_util.py. Please create the file.")
@@ -72,8 +74,8 @@ class Config:
 
     # --- UPDATED FILE PATHS FOR MULTI-FILE/TAB SUPPORT ---
     INPUT_FILE_PATHS: List[str] = [
-        # '../sheets/file1.xlsx',
-        # '../sheets/file2.xlsx',
+        '../sheets/file1.xlsx',
+        '../sheets/file2.xlsx',
         '../sheets/loan.xlsx'
     ]
     PARQUET_OUTPUT_DIR = 'parquet_files/'
@@ -370,8 +372,6 @@ def main():
     config = Config() # Instantiate the config object here
     
     try:
-        from duckdb_util import setup_duckdb_azure_connection, close_persistent_duckdb_connection
-        # 1. Authenticate once at the start
         setup_duckdb_azure_connection(config) 
         # 2. Register a cleanup function to close the connection on exit
         atexit.register(close_persistent_duckdb_connection) 
@@ -436,21 +436,11 @@ def main():
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
         llm_client,
-        # "What is Maximum Discount for each price change reason and 
-        "what is loan amount of Harrison, Ters.",
+        "What is Maximum Discount offered when price changed due to Seasonal reasons and what is loan amount of Harrison, Ters.",
         all_parquet_files,
         global_catalog,
         first_excel_path,
-        config # <-- PASS CONFIG HERE
-    )
-    
-    generate_and_execute_query(
-        llm_client,
-        "what is highest loan amount",
-        all_parquet_files,
-        global_catalog,
-        first_excel_path,
-        config # 
+        config 
     )
     
     print("\n--- Execution Complete ---")

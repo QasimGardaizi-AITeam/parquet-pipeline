@@ -6,9 +6,11 @@ import glob
 import sys 
 from azure.storage.blob import BlobServiceClient 
 import atexit 
+import time
 
 # Placeholder/Fallback for vector_ingestion_util
 try:
+    # Assuming this module exists in your pipeline directory
     from vector_ingestion_util import ingest_to_vector_db 
 except ImportError:
     def ingest_to_vector_db(file_path, sheet_name=None):
@@ -25,13 +27,13 @@ PERSISTENT_DUCKDB_CONN = None
 def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
     """
     Initializes a NEW DuckDB connection, sets Azure Blob Storage credentials,
-    and returns the connection object. It caches the connection globally for reuse.
+    and returns the connection object. It caches the connection globally for reuse 
+    for all READ operations (which are sequential in the final execution thread).
     """
     global PERSISTENT_DUCKDB_CONN
     
     if PERSISTENT_DUCKDB_CONN is not None:
         # Connection already established and authenticated
-        # print("[INFO] Reusing existing persistent DuckDB connection.") # Suppress for cleaner logs
         return PERSISTENT_DUCKDB_CONN
 
     try:
@@ -119,6 +121,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
             all_schema_lines = ["TABLE SCHEMAS (JOIN MODE)"]
             
             for i, p_path in enumerate(parquet_paths):
+                # Ensure the path splitting handles potential Azure URIs correctly
                 logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0] 
                 alias = f"T{i+1}"
                 
@@ -134,6 +137,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
             schema_string = "\n".join(all_schema_lines)
             
             if parquet_paths:
+                # Use the first path for a sample if in JOIN mode
                 df_sample = conn.execute(f"SELECT * FROM read_parquet('{parquet_paths[0]}') LIMIT 5").fetchdf()
                  
         # NOTE: Connection remains open
@@ -150,10 +154,13 @@ def execute_duckdb_query(query: str, config: Any) -> pd.DataFrame:
         # 1. Get the persistent connection
         conn = setup_duckdb_azure_connection(config)
         
+        # Execute query
         result_df = conn.execute(query).fetchdf()
+        
         # NOTE: Connection remains open
         return result_df
     except Exception as e:
+        # Ensure errors are returned cleanly
         return pd.DataFrame({'Error': [str(e)]})
 
 
@@ -161,6 +168,9 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     """
     Reads Excel, converts each sheet to a Parquet file locally, uploads to Azure,
     and returns the list of Azure URIs.
+    
+    CRITICAL FIX: This function uses a thread-local DuckDB connection to avoid 
+    concurrency issues with the main global connection during parallel ingestion.
     """
     base_name = os.path.splitext(os.path.basename(input_path))[0]
     azure_uris = []
@@ -168,6 +178,7 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     print(f"[INFO] Scanning '{os.path.basename(input_path)}' for sheets...")
     
     try:
+        # Read Excel sheets using Pandas (thread-safe)
         excel_sheets = pd.read_excel(input_path, sheet_name=None, engine='openpyxl')
     except Exception as e:
         print(f"[ERROR] Failed to read Excel file {input_path}: {e}")
@@ -177,12 +188,23 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     LOCAL_TEMP_DIR = "/tmp/parquet_cache"
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
     
-    # 1. Get connection (will connect and authenticate if needed)
+    # 1. --- THREAD-LOCAL DUCKDB CONNECTION SETUP ---
+    conn = None
     try:
-        conn = setup_duckdb_azure_connection(config)
+        # Create a NEW, ISOLATED DuckDB Connection for this thread
+        conn = duckdb.connect()
+        conn.execute("INSTALL azure;")
+        conn.execute("LOAD azure;")
+        
+        # Authenticate the thread-local connection
+        if config.AZURE_STORAGE_CONNECTION_STRING:
+            escaped_conn_str = config.AZURE_STORAGE_CONNECTION_STRING.replace("'", "''")
+            conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+        
     except Exception as e:
-        print(f"[ERROR] Could not set up DuckDB connection for Parquet writing: {e}")
+        print(f"[ERROR] Could not set up thread-local DuckDB connection for Parquet writing: {e}")
         return []
+    # -----------------------------------------------
 
     for sheet_name, df in excel_sheets.items():
         safe_sheet_name = "".join(c for c in sheet_name if c.isalnum() or c in (' ', '_')).rstrip()
@@ -194,27 +216,32 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
         print(f"[INFO] Converting sheet '{sheet_name}' to Parquet and writing locally to: {local_temp_path}")
         
         try:
-            # Use DuckDB to write the DataFrame to the local path
+            # Use the thread-local DuckDB connection for file writing
             conn.register('temp_df', df)
-            conn.execute(f"COPY temp_df TO '{local_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD);")
+            # Use zstd compression for efficiency
+            conn.execute(f"COPY temp_df TO '{local_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD);") 
             conn.unregister('temp_df')
 
-            # 2. Upload the local file to Azure Blob Storage using the SDK (Function from duckdb_util)
+            # 2. Upload the local file to Azure Blob Storage using the SDK (thread-safe operation)
             azure_uri = upload_file_to_azure(local_temp_path, remote_file_name, config)
             
-            # 3. Trigger ingestion to vector DB, passing the Azure URI
+            # 3. Trigger ingestion to vector DB (this is also thread-local/safe)
             ingest_to_vector_db(azure_uri, sheet_name=sheet_name) 
             
             azure_uris.append(azure_uri)
             
             # 4. Clean up local temp file
             os.remove(local_temp_path)
-            del df
+            del df # Explicitly delete the DataFrame reference
             
         except Exception as e:
+            # Re-raise error to show the cause of failure
             print(f"[ERROR] Failed to convert/upload sheet '{sheet_name}': {e}")
             
-    # NOTE: Connection remains open
+    # 5. Close the THREAD-LOCAL connection when this function/thread finishes its work
+    if conn:
+        conn.close()
+        
     print(f"[SUCCESS] {len(azure_uris)} Parquet files created and ingested from {os.path.basename(input_path)}.")
     return azure_uris
 
@@ -227,7 +254,7 @@ def get_blob_uri(file_name: str, config: Any) -> str:
 def upload_file_to_azure(local_path: str, remote_file_path: str, config: Any) -> str:
     """
     Uploads a local file to Azure Blob Storage using the SDK.
-    Returns the full Azure URI on success.
+    Returns the full Azure URI on success. (This function is thread-safe)
     """
     try:
         connection_string = config.AZURE_STORAGE_CONNECTION_STRING
