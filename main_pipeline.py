@@ -59,11 +59,11 @@ class Config:
 
     # --- UPDATED FILE PATHS FOR MULTI-FILE/TAB SUPPORT ---
     INPUT_FILE_PATHS: List[str] = [
-        '../sheets/file1.xlsx', 
-        '../sheets/file2.xlsx',
+        '../sheets/file1.xlsx',
+        '../sheets/file2.xlsx'
         # Add any other specific file paths here
     ]
-    PARQUET_OUTPUT_DIR = '../data_parquet/' # Directory to store all Parquet files (one per sheet/file)
+    PARQUET_OUTPUT_DIR = '../data/' # Directory to store all Parquet files (one per sheet/file)
     ALL_PARQUET_GLOB_PATTERN = os.path.join(PARQUET_OUTPUT_DIR, '*.parquet') 
     
     @staticmethod
@@ -135,8 +135,12 @@ def convert_excel_to_parquet(input_path: str, output_dir: str) -> List[str]:
     print(f"[INFO] Scanning '{os.path.basename(input_path)}' for sheets...")
     
     # Read all sheets from the Excel file
-    excel_sheets = pd.read_excel(input_path, sheet_name=None, engine='openpyxl')
-    
+    try:
+        excel_sheets = pd.read_excel(input_path, sheet_name=None, engine='openpyxl')
+    except Exception as e:
+        print(f"[ERROR] Failed to read Excel file {input_path}: {e}")
+        return []
+        
     for sheet_name, df in excel_sheets.items():
         # Clean sheet name for file system (remove spaces/special chars)
         safe_sheet_name = "".join(c for c in sheet_name if c.isalnum() or c in (' ', '_')).rstrip()
@@ -150,12 +154,13 @@ def convert_excel_to_parquet(input_path: str, output_dir: str) -> List[str]:
         parquet_paths.append(output_path)
         
         # Ingest to vector DB for semantic RAG on this specific sheet
+        # This includes chunking and embedding, which is the time-consuming part
         ingest_to_vector_db(output_path, sheet_name=sheet_name) 
         
-        # CRITICAL: Delete the DataFrame object to free up RAM
+        # Delete the DataFrame object to free up RAM
         del df
         
-    print(f"[SUCCESS] {len(parquet_paths)} Parquet files created and ingested.")
+    print(f"[SUCCESS] {len(parquet_paths)} Parquet files created and ingested from {os.path.basename(input_path)}.")
     return parquet_paths
 
 def build_global_catalog(parquet_files: List[str]) -> str:
@@ -189,8 +194,44 @@ def execute_duckdb_query(query: str) -> pd.DataFrame:
 # 3. LLM ROUTER & CORE RAG FUNCTION (process_single_query is updated below)
 
 def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame) -> Literal['SEMANTIC_SEARCH', 'SQL_QUERY']:
-    # Placeholder for the actual router logic
-    return 'SQL_QUERY' # Default to SQL for simplicity of the change
+    """
+    Uses the LLM to classify the user's question intent based on schema and sample data.
+    """
+    if not llm_client: return 'SQL_QUERY'
+
+    ROUTER_SYSTEM_PROMPT = f"""
+        You are an intelligent routing agent. Your task is to classify the user's question based on the provided database context.
+        --- DATABASE CONTEXT ---
+        SCHEMA:
+        {schema}
+        
+        SAMPLE DATA (Top 5 Rows):
+        {df_sample.to_markdown(index=False)}
+        
+        --- CLASSIFICATION RULES ---
+        1. **SEMANTIC_SEARCH**: Choose this intent if the query involves: fuzzy matching, potentially misspelled names (like 'Smithe'), or conceptual descriptions that require vector similarity (like 'high value collateral'). 
+        2. **SQL_QUERY**: Choose this intent if the query involves: direct calculations, aggregation functions (SUM, AVG, COUNT, MIN, MAX), or precise filtering on structured numeric or categorical columns.
+
+        Your output MUST be a single JSON object with the key 'intent'.
+        Example: {{"intent": "SEMANTIC_SEARCH"}}
+        """
+    
+    try:
+        response = llm_client.chat.completions.create(
+            model=Config.LLM_DEPLOYMENT_NAME,
+            messages=[
+                {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
+                {"role": "user", "content": f"User Query: {user_question}"}
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"}
+        )
+        json_output = json.loads(response.choices[0].message.content.strip())
+        intent = json_output.get("intent", "SQL_QUERY").upper()
+        return intent if intent in ['SEMANTIC_SEARCH', 'SQL_QUERY'] else 'SQL_QUERY'
+            
+    except Exception as e:
+        return 'SQL_QUERY'
 
 def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame, 
                          parquet_files: List[str], excel_path: str, join_key: str) -> Tuple[str, pd.DataFrame, float, str]:
@@ -417,22 +458,32 @@ def main():
     
     all_parquet_files = [] # This list will hold ALL final Parquet paths
 
-    # 1. Iterate over the explicit list of files
-    for excel_input_path in Config.INPUT_FILE_PATHS:
+    # 1. PARALLEL FILE PROCESSING AND INGESTION (NEW IMPLEMENTATION)
+    # Using ThreadPoolExecutor to process files concurrently (for I/O and latency-bound tasks like ingestion/embedding)
+    MAX_WORKERS = 4 
+    
+    print(f"[INFO] Starting parallel file processing for {len(Config.INPUT_FILE_PATHS)} files with {MAX_WORKERS} threads.")
+    
+    
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         
-        if not os.path.exists(excel_input_path):
-            print(f"[WARNING] Input file not found at {excel_input_path}. Skipping.")
-            continue
+        future_to_file = {
+            executor.submit(
+                convert_excel_to_parquet, 
+                excel_input_path, 
+                Config.PARQUET_OUTPUT_DIR
+            ): excel_input_path for excel_input_path in Config.INPUT_FILE_PATHS
+            if os.path.exists(excel_input_path)
+        }
         
-        try:
-            # Step 1: Convert all sheets in this file to individual Parquet files
-            sheet_parquet_paths = convert_excel_to_parquet(excel_input_path, Config.PARQUET_OUTPUT_DIR)
-            all_parquet_files.extend(sheet_parquet_paths)
-            
-        except Exception as e:
-            print(f"\n[FATAL] Pipeline failed during file processing of {excel_input_path}: {e}")
-            sys.exit(1)
-            
+        for future in as_completed(future_to_file):
+            excel_input_path = future_to_file[future]
+            try:
+                sheet_parquet_paths = future.result()
+                all_parquet_files.extend(sheet_parquet_paths)
+            except Exception as exc:
+                print(f"\n[FATAL] Pipeline failed during processing of {excel_input_path}: {exc}")
+                
     if not all_parquet_files:
         print("[CRITICAL] No data files were successfully processed. Aborting.")
         sys.exit(1)
@@ -457,7 +508,7 @@ def main():
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
         llm_client,
-        "What is highest discount percentage for each price change reason",
+        "What is Maximum Discount for each price change reason",
         all_parquet_files,
         global_catalog,
         first_excel_path

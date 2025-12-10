@@ -112,7 +112,7 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
         print(f"[FATAL ERROR] Failed to create or verify Atlas Vector Search Index: {e}")
         return False
 
-def wait_for_vector_sync(db, collection_name, inserted_id, index_name="vector_index", timeout=180):
+def wait_for_vector_sync(db, collection_name, inserted_id, index_name="vector_index", timeout=30):
     """
     Waits until a newly inserted document is discoverable by Atlas Search using its _id.
     This resolves the eventual consistency problem.
@@ -284,7 +284,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str, collection_prefix: str 
                 
                 # --- ATLAS SEARCH SYNC CHECK ---
                 # The Sync timeout is now correctly passed as a keyword argument
-                SYNC_TIMEOUT = 180 
+                SYNC_TIMEOUT = 30 
                 if first_chunk_id and not wait_for_vector_sync(
                     db, 
                     COLLECTION_NAME, 
