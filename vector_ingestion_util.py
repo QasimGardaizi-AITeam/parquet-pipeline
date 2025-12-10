@@ -1,12 +1,12 @@
 import os
 import sys
 import pandas as pd
-import time # CRITICAL: Ensure this is imported
+import time
 from dotenv import load_dotenv
 from openai import AzureOpenAI
 from pymongo import MongoClient
 import pymongo 
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 import traceback 
 
 # --- 1. Environment & Client Setup ---
@@ -14,9 +14,9 @@ import traceback
 # Load environment variables once at the module level
 load_dotenv()
 
-# --- Configuration Mapping ---
+# --- Configuration Mapping (Using user's EXACT environment variable names) ---
 try:
-    # Azure OpenAI Configuration
+    # Azure OpenAI Configuration - Building the endpoint URL exactly as specified by the user
     AZURE_ENDPOINT = f"https://{os.environ['OPENAI_EMBEDDING_RESOURCE']}.openai.azure.com/"
     AZURE_API_KEY = os.environ['OPENAI_EMBEDDING_API_KEY']
     AZURE_API_VERSION = os.environ['OPENAI_EMBEDDING_VERSION']
@@ -24,20 +24,18 @@ try:
     
     # MongoDB Configuration
     MONGO_URI = os.environ['MONGO_URI']
-    DATABASE_NAME = "vector_rag_db" 
-    VECTOR_INDEX_NAME = "vector_index" # Ensure this variable exists for the sync function
-    
+    DATABASE_NAME = os.getenv("MONGO_DATABASE_NAME", "vector_rag_db")
+    VECTOR_INDEX_NAME = os.getenv("MONGO_VECTOR_INDEX_NAME", "vector_index")
+
 except KeyError as e:
     print(f"FATAL ERROR (Ingestion): Missing environment variable {e}. Ingestion cannot proceed.")
     sys.exit(1)
 
-# Initialize Clients
-# ... (Client initialization code remains the same) ...
 try:
     openai_client = AzureOpenAI(
-        azure_endpoint=AZURE_ENDPOINT,
-        api_key=AZURE_API_KEY,
-        api_version=AZURE_API_VERSION
+    azure_endpoint=AZURE_ENDPOINT,
+    api_key=AZURE_API_KEY,
+    api_version=AZURE_API_VERSION
     )
 except Exception as e:
     print(f"FATAL ERROR (Ingestion): Error initializing Azure OpenAI client: {e}")
@@ -45,9 +43,10 @@ except Exception as e:
 
 try:
     # Increased timeout for large bulk operations
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=60000) 
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=60000)
     db = mongo_client[DATABASE_NAME]
     mongo_client.admin.command('ping')
+
 except Exception as e:
     print(f"FATAL ERROR (Ingestion): Error connecting to MongoDB Atlas: {e}")
     sys.exit(1)
@@ -113,8 +112,7 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
         print(f"[FATAL ERROR] Failed to create or verify Atlas Vector Search Index: {e}")
         return False
 
-# --- NEW FUNCTION FOR READ-AFTER-WRITE SYNC ---
-def wait_for_vector_sync(db, collection_name, inserted_id, index_name="vector_index", timeout=30):
+def wait_for_vector_sync(db, collection_name, inserted_id, index_name="vector_index", timeout=180):
     """
     Waits until a newly inserted document is discoverable by Atlas Search using its _id.
     This resolves the eventual consistency problem.
@@ -122,7 +120,7 @@ def wait_for_vector_sync(db, collection_name, inserted_id, index_name="vector_in
     collection = db[collection_name]
     start_time = time.time()
     
-    print(f"[SYNC CHECK] Starting sync check for new document ID: {str(inserted_id)}.")
+    print(f"[SYNC CHECK] Starting sync check for new document ID: {str(inserted_id)}. Max Wait: {timeout}s")
     
     while time.time() - start_time < timeout:
         try:
@@ -150,13 +148,12 @@ def wait_for_vector_sync(db, collection_name, inserted_id, index_name="vector_in
             # Silently ignore connection or transient errors during the sync check
             pass
 
-        print(f"[SYNC WAIT] Document not yet indexed. Waiting 2s...")
-        time.sleep(2) # Wait 2 seconds between checks
+        print(f"[SYNC WAIT] Document not yet indexed. Waiting 3s...")
+        time.sleep(3) # Wait 3 seconds between checks
     
     print(f"[SYNC ERROR] Timeout waiting for document ID {str(inserted_id)} to be indexed in Atlas Search.")
     return False
 
-# ... (chunk_dataframe_dynamic remains the same) ...
 def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) -> List[Dict[str, Any]]:
     """Dynamically chunk a DataFrame into text blocks."""
     chunks = []
@@ -166,8 +163,10 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
     current_size = 0
 
     for idx, row in df.iterrows():
-        # CRITICAL: Ensure row values are converted to string for reliable chunking
-        row_text = " | ".join([f"{col}:{str(row[col])}" for col in headers]) 
+        # CRITICAL: Robustly handle potential NaN values and ensure string conversion
+        row_values = [str(row[col]) if pd.notna(row[col]) else "NULL" for col in headers]
+        row_text = " | ".join([f"{col}:{val}" for col, val in zip(headers, row_values)]) 
+        
         row_index_label = df.index.name if df.index.name else 'index'
         row_text_with_index = f"[{row_index_label} {idx}] {row_text}"
         row_size = len(row_text_with_index)
@@ -191,31 +190,40 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
     return chunks
 
 # ------------------------------------------------
-# 3. Core Ingestion Function (Updated)
+# 3. Core Ingestion Function (Updated for Multi-Source)
 # ------------------------------------------------
-def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") -> Union[bool, str]:
+def ingest_to_vector_db(file_path: str, sheet_name: str, collection_prefix: str = "data_source") -> Union[bool, str]:
     """
-    Loads data from the given file, chunks, embeds, and inserts into MongoDB Atlas.
+    Loads data from the given Parquet file (representing a unique logical table/sheet), 
+    chunks, embeds, and inserts into a uniquely named MongoDB Atlas Collection.
+    
+    Args:
+        file_path (str): The path to the Parquet file to ingest.
+        sheet_name (str): The name of the sheet/tab, used for unique collection naming.
+        collection_prefix (str): Prefix for the MongoDB collection name.
+        
+    Returns:
+        Union[bool, str]: True on success, or an error string on failure.
     """
     
     # 1. Determine Dynamic Collection Name and Collection Object
     base_name = os.path.splitext(os.path.basename(file_path))[0]
-    COLLECTION_NAME = f"{collection_prefix}_{base_name}"
+    sheet_name_clean = "".join(c for c in sheet_name if c.isalnum() or c in ('_',)).rstrip().lower()
+    
+    # Use the filename (which contains the sheet name) for the unique collection name
+    COLLECTION_NAME = f"{collection_prefix}_{base_name}" 
     
     write_concern = pymongo.WriteConcern(w=1)
     collection = db.get_collection(COLLECTION_NAME, write_concern=write_concern)
     
-    print(f"\n--- Starting Ingestion for Collection: '{COLLECTION_NAME}' ---")
+    print(f"\n--- Starting Ingestion for Collection: '{COLLECTION_NAME}' (Source: {os.path.basename(file_path)}) ---")
 
-    # 2. Load Data (Remains the same)
+    # 2. Load Data (Only Parquet is expected here)
     try:
-        if file_path.endswith('.xlsx'):
-            df = pd.read_excel(file_path, engine='openpyxl')
-        elif file_path.endswith('.parquet'):
-            df = pd.read_parquet(file_path)
-        else:
-            return f"Error: Unsupported file format for {file_path}. Must be .xlsx or .parquet."
-            
+        if not file_path.endswith('.parquet'):
+            print("[WARNING] Expected Parquet file path. Attempting to load.")
+        
+        df = pd.read_parquet(file_path)
         print(f"Data loaded: {len(df)} rows.")
         
     except FileNotFoundError:
@@ -223,7 +231,6 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
     except Exception as e:
         return f"Error during data loading: {e}"
     
-    # ... (Chunking and Embedding remains the same) ...
     # 3. Chunking & Embedding
     chunks = chunk_dataframe_dynamic(df, max_tokens_per_chunk=1000)
     print(f"Generated {len(chunks)} chunks.")
@@ -244,7 +251,6 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
 
     # 4. Prepare and Insert Documents
     mongo_documents = []
-    # --- Capture the first ID for synchronization check ---
     first_chunk_id = None 
     
     for i, chunk in enumerate(chunks):
@@ -255,13 +261,10 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
         mongo_doc = {
             "_id": doc_id, 
             "text": chunk["text"],
-            "metadata": chunk["metadata"],
+            "metadata": {**chunk["metadata"], "source_file": os.path.basename(file_path)}, # Add source file to metadata
             "embedding": chunk_embeddings[i]
         }
         mongo_documents.append(mongo_doc)
-        
-    print(f"Preparing to insert {len(mongo_documents)} documents into MongoDB...")
-    # ... (rest of prep remains the same) ...
 
     if mongo_documents:
         try:
@@ -273,15 +276,22 @@ def ingest_to_vector_db(file_path: str, collection_prefix: str = "data_source") 
             
             result = collection.insert_many(
                 mongo_documents, 
-                ordered=False, # Set to False for faster insertion
+                ordered=False, 
             )
             
-            # Explicitly check if insertion was successful
             if len(result.inserted_ids) == len(mongo_documents):
                 print(f"Successfully inserted {len(mongo_documents)} chunks. (Write Acknowledged)")
                 
-                # --- CRITICAL FIX: ATLAS SEARCH SYNC CHECK ---
-                if first_chunk_id and not wait_for_vector_sync(db, COLLECTION_NAME, first_chunk_id, index_name=VECTOR_INDEX_NAME):
+                # --- ATLAS SEARCH SYNC CHECK ---
+                # The Sync timeout is now correctly passed as a keyword argument
+                SYNC_TIMEOUT = 180 
+                if first_chunk_id and not wait_for_vector_sync(
+                    db, 
+                    COLLECTION_NAME, 
+                    first_chunk_id, 
+                    index_name=VECTOR_INDEX_NAME, 
+                    timeout=SYNC_TIMEOUT
+                ):
                     return "Error: Atlas Search synchronization timed out. Retrieval will be unreliable."
                 
                 # --- AUTOMATICALLY ENSURE INDEX EXISTS ---
