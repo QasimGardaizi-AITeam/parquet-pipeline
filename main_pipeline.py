@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 import sys
-import duckdb
+import duckdb # Keep this for direct use if needed, but the logic is now in util
 import json
 from openai import AzureOpenAI
 import uuid
@@ -11,6 +11,21 @@ from typing import Literal, Tuple, List, Dict, Any
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed 
 import glob 
+
+# --- NEW UTILITY IMPORTS ---
+# Import all DuckDB/Data Processing functions from the new utility file
+try:
+    from duckdb_util import (
+        get_parquet_context,
+        convert_excel_to_parquet,
+        build_global_catalog,
+        execute_duckdb_query
+    )
+except ImportError:
+    print("[FATAL] Missing duckdb_util.py. Please create the file.")
+    sys.exit(1)
+# -------------------------
+
 
 # Placeholder/Fallback logic for decomposition_util
 try:
@@ -31,20 +46,13 @@ except ImportError:
         return ["*"], ""
 
 
-# Placeholder/Fallback for ingestion and retrieval (assuming they are file-path aware)
+# Placeholder/Fallback for retrieval (ingestion is now imported in duckdb_util)
 try:
-    # Assuming the user has updated vector_ingestion_util with the 180s timeout fix
     from retrival_util import get_semantic_context_for_query 
 except ImportError:
     def get_semantic_context_for_query(query, file_name, limit):
         print("[WARNING] Using fallback semantic context.")
         return ""
-try:
-    from vector_ingestion_util import ingest_to_vector_db 
-except ImportError:
-    def ingest_to_vector_db(file_path, sheet_name=None):
-        print(f"[WARNING] Using fallback ingestion for {file_path}.")
-        return True # Assume success
 
 
 load_dotenv()
@@ -88,146 +96,16 @@ def setup_llm_client():
         print(f"[ERROR] Configuring AzureOpenAI Client: {e}")
         return None
 
-def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = False) -> Tuple[str, pd.DataFrame]:
-    """
-    Dynamically gets the combined schema and top 5 rows from a list of Parquet files.
-    Handles JOIN (separate schemas) vs. UNION (combined schema).
-    
-    Args:
-        parquet_paths (List[str]): List of Parquet file paths.
-        use_union_by_name (bool): True for UNION mode (combining all columns), False for JOIN mode (separate tables).
+# NOTE: Removed get_parquet_context - it is now in duckdb_util.py
 
-    Returns:
-        Tuple[str, pd.DataFrame]: The schema context string and sample data.
-    """
-    try:
-        if not parquet_paths:
-             return "TABLE SCHEMA: No Parquet files specified.", pd.DataFrame()
-        
-        conn = duckdb.connect()
-        schema_string = ""
-        df_sample = pd.DataFrame()
+# NOTE: Removed convert_excel_to_parquet - it is now in duckdb_util.py
 
-        if use_union_by_name:
-            # --- UNION MODE (Original Logic - Valid Syntax) ---
-            paths_str = ', '.join(f"'{p}'" for p in parquet_paths)
-            union_flag = ", union_by_name=true"
-            # Query the unified view
-            query = f"SELECT * FROM read_parquet([{paths_str}]{union_flag})"
-            
-            # Describe the result of the query
-            schema_df = conn.execute(f"DESCRIBE {query}").fetchdf()
-            
-            schema_lines = [f"Column: {row['column_name']} ({row['column_type']})" 
-                            for index, row in schema_df.iterrows()]
-            schema_string = f"TABLE SCHEMA (UNIONED):\n" + "\n".join(schema_lines)
-            
-            # Get Sample Data from the unified view
-            df_sample = conn.execute(f"{query} LIMIT 5").fetchdf()
-            
-        else:
-            # --- JOIN MODE (New Logic - Corrected DuckDB Syntax) ---
-            # Describe each table separately for the LLM context
-            
-            all_schema_lines = ["TABLE SCHEMAS (JOIN MODE)"]
-            
-            for i, p_path in enumerate(parquet_paths):
-                logical_name = os.path.splitext(os.path.basename(p_path))[0]
-                alias = f"T{i+1}"
-                
-                # --- CRITICAL FIX: Wrap read_parquet in (SELECT * FROM ...) for DESCRIBE ---
-                describe_query = f"DESCRIBE (SELECT * FROM read_parquet('{p_path}'))" 
-                
-                # Get schema for the single file
-                schema_df = conn.execute(describe_query).fetchdf()
-                
-                all_schema_lines.append(f"\n--- LOGICAL TABLE: {logical_name} (Alias: {alias}) ---")
-                
-                col_lines = [f"Column: {row['column_name']} ({row['column_type']})" 
-                             for index, row in schema_df.iterrows()]
-                all_schema_lines.extend(col_lines)
+# NOTE: Removed build_global_catalog - it is now in duckdb_util.py
 
-            schema_string = "\n".join(all_schema_lines)
-            
-            # For sample data in JOIN mode, just show a sample of the first file or an empty frame
-            if parquet_paths:
-                 df_sample = conn.execute(f"SELECT * FROM read_parquet('{parquet_paths[0]}') LIMIT 5").fetchdf()
-                 
-        conn.close()
-        return schema_string, df_sample
-        
-    except Exception as e:
-         print(f"[CRITICAL ERROR] Failed to retrieve Parquet context: {e}")
-         return "TABLE SCHEMA: Failed to load dynamic schema.", pd.DataFrame()
+# NOTE: Removed execute_duckdb_query - it is now in duckdb_util.py
 
 
-# 2. DATA PROCESSING AND DUCKDB EXECUTION
-def convert_excel_to_parquet(input_path: str, output_dir: str) -> List[str]:
-    """Reads Excel, converts each sheet to a separate Parquet file, and returns file paths."""
-    os.makedirs(output_dir, exist_ok=True)
-    base_name = os.path.splitext(os.path.basename(input_path))[0]
-    parquet_paths = []
-    
-    print(f"[INFO] Scanning '{os.path.basename(input_path)}' for sheets...")
-    
-    # Read all sheets from the Excel file
-    try:
-        excel_sheets = pd.read_excel(input_path, sheet_name=None, engine='openpyxl')
-    except Exception as e:
-        print(f"[ERROR] Failed to read Excel file {input_path}: {e}")
-        return []
-        
-    for sheet_name, df in excel_sheets.items():
-        # Clean sheet name for file system (remove spaces/special chars)
-        safe_sheet_name = "".join(c for c in sheet_name if c.isalnum() or c in (' ', '_')).rstrip()
-        file_name = f"{base_name}_{safe_sheet_name}.parquet"
-        output_path = os.path.join(output_dir, file_name)
-        
-        print(f"[INFO] Converting sheet '{sheet_name}' to Parquet: {output_path}")
-        
-        # Save to Parquet
-        df.to_parquet(output_path, engine='pyarrow', compression='snappy', index=False)
-        parquet_paths.append(output_path)
-        
-        # Ingest to vector DB for semantic RAG on this specific sheet
-        # This includes chunking and embedding, which is the time-consuming part
-        ingest_to_vector_db(output_path, sheet_name=sheet_name) 
-        
-        # Delete the DataFrame object to free up RAM
-        del df
-        
-    print(f"[SUCCESS] {len(parquet_paths)} Parquet files created and ingested from {os.path.basename(input_path)}.")
-    return parquet_paths
-
-def build_global_catalog(parquet_files: List[str]) -> str:
-    """Generates a simplified, LLM-readable catalog of all available logical tables."""
-    catalog = []
-    
-    conn = duckdb.connect()
-    for p_path in parquet_files:
-        logical_name = os.path.splitext(os.path.basename(p_path))[0]
-        try:
-            schema_df = conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{p_path}')").fetchdf()
-            columns = ', '.join(schema_df['column_name'].tolist())
-            catalog.append(f"Logical Table: {logical_name} (Columns: {columns})")
-        except Exception as e:
-            catalog.append(f"Logical Table: {logical_name} (ERROR: Failed to read schema)")
-
-    conn.close()
-    return "\n".join(catalog)
-
-
-def execute_duckdb_query(query: str) -> pd.DataFrame:
-    """Executes a SQL query against the local Parquet files using DuckDB."""
-    try:
-        conn = duckdb.connect()
-        result_df = conn.execute(query).fetchdf()
-        conn.close()
-        return result_df
-    except Exception as e:
-        return pd.DataFrame({'Error': [str(e)]})
-
-# 3. LLM ROUTER & CORE RAG FUNCTION (process_single_query is updated below)
+# 3. LLM ROUTER & CORE RAG FUNCTION 
 
 def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame) -> Literal['SEMANTIC_SEARCH', 'SQL_QUERY']:
     """
@@ -301,7 +179,7 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
     # 3. Dynamic Table Source Definition (FIXED LOGIC)
     
     # Check if we should use the multi-file JOIN definition
-    if len(parquet_files) > 1 and join_key:
+    if len(parquet_files) > 1 and join_key and not (parquet_files == [Config.ALL_PARQUET_GLOB_PATTERN]):
         # Scenario: Multiple tables need a JOIN
         table_aliases = []
         parquet_reads = []
@@ -318,7 +196,7 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
             + ", ".join(parquet_reads)
         )
     else:
-        # Scenario: Single file, or multiple files using UNION_BY_NAME (e.g., when tables_required = ['*'])
+        # Scenario: Single file, or multiple files using UNION_BY_NAME
         paths_str = ', '.join(f"'{p}'" for p in parquet_files)
         
         if parquet_files == [Config.ALL_PARQUET_GLOB_PATTERN]:
@@ -423,10 +301,11 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
         return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["No relevant files could be identified."]}) }
         
     # 2. Get SCHEMA and SAMPLE DATA for the identified tables
-    # Note: Only use UNION_BY_NAME when NOT using JOIN mode (i.e., when loading all files or for simple unions)
+    # CRITICAL: Pass the glob pattern to the util function
     parquet_schema, df_sample = get_parquet_context(
         target_parquet_files,
-        use_union_by_name=use_union_by_name
+        use_union_by_name=use_union_by_name,
+        all_parquet_glob_pattern=Config.ALL_PARQUET_GLOB_PATTERN # Passed here
     )
     
     # 3. DECOMPOSITION
@@ -494,8 +373,7 @@ def main():
     
     all_parquet_files = [] # This list will hold ALL final Parquet paths
 
-    # 1. PARALLEL FILE PROCESSING AND INGESTION (NEW IMPLEMENTATION)
-    # Using ThreadPoolExecutor to process files concurrently (for I/O and latency-bound tasks like ingestion/embedding)
+    # 1. PARALLEL FILE PROCESSING AND INGESTION
     MAX_WORKERS = 4 
     
     print(f"[INFO] Starting parallel file processing for {len(Config.INPUT_FILE_PATHS)} files with {MAX_WORKERS} threads.")
