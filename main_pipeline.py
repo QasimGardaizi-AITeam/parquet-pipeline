@@ -1,16 +1,14 @@
 import pandas as pd
 import os
 import sys
-import duckdb # Keep this for direct use if needed, but the logic is now in util
 import json
 from openai import AzureOpenAI
 import uuid
 from datetime import datetime
 from dotenv import load_dotenv
-from typing import Literal, Tuple, List, Dict, Any
+from typing import Literal, Tuple, List, Dict
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed 
-import glob 
 
 # --- NEW UTILITY IMPORTS ---
 # Import all DuckDB/Data Processing functions from the new utility file
@@ -64,15 +62,25 @@ class Config:
     LLM_ENDPOINT = os.getenv("azureOpenAIEndpoint")
     LLM_API_VERSION = os.getenv("azureOpenAIApiVersion", "2024-08-01-preview")
     LLM_MODEL_NAME = "gpt-4o"
+    
+    # Blob Storage
+    AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
+    AZURE_STORAGE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME")
+    AZURE_STORAGE_ACCOUNT_KEY = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
+    AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
 
     # --- UPDATED FILE PATHS FOR MULTI-FILE/TAB SUPPORT ---
     INPUT_FILE_PATHS: List[str] = [
         '../sheets/file1.xlsx',
-        '../sheets/file2.xlsx'
+        '../sheets/file2.xlsx',
+        '../sheets/loan.xlsx'
         # Add any other specific file paths here
     ]
-    PARQUET_OUTPUT_DIR = '../data/' # Directory to store all Parquet files (one per sheet/file)
-    ALL_PARQUET_GLOB_PATTERN = os.path.join(PARQUET_OUTPUT_DIR, '*.parquet') 
+    PARQUET_OUTPUT_DIR = 'parquet_files/' # Directory to store all Parquet files (one per sheet/file)
+    ALL_PARQUET_GLOB_PATTERN = (
+        f"azure://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/"
+        f"{AZURE_STORAGE_CONTAINER_NAME}/{PARQUET_OUTPUT_DIR}*.parquet"
+    )
     
     @staticmethod
     def validate_env():
@@ -95,15 +103,6 @@ def setup_llm_client():
     except Exception as e:
         print(f"[ERROR] Configuring AzureOpenAI Client: {e}")
         return None
-
-# NOTE: Removed get_parquet_context - it is now in duckdb_util.py
-
-# NOTE: Removed convert_excel_to_parquet - it is now in duckdb_util.py
-
-# NOTE: Removed build_global_catalog - it is now in duckdb_util.py
-
-# NOTE: Removed execute_duckdb_query - it is now in duckdb_util.py
-
 
 # 3. LLM ROUTER & CORE RAG FUNCTION 
 
@@ -148,10 +147,11 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
         return 'SQL_QUERY'
 
 def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame, 
-                         parquet_files: List[str], excel_path: str, join_key: str) -> Tuple[str, pd.DataFrame, float, str]:
+                         parquet_files: List[str], excel_path: str, join_key: str, config: Config) -> Tuple[str, pd.DataFrame, float, str]:
     """
     CORE WORKER: Processes a single, atomic query through the Hybrid RAG pipeline.
     CRITICAL UPDATE: Logic to build TABLE_DEFINITION for JOIN vs. UNION.
+    (Added config argument for execute_duckdb_query)
     """
     
     start_time = time.time()
@@ -199,9 +199,9 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         # Scenario: Single file, or multiple files using UNION_BY_NAME
         paths_str = ', '.join(f"'{p}'" for p in parquet_files)
         
-        if parquet_files == [Config.ALL_PARQUET_GLOB_PATTERN]:
+        if parquet_files == [config.ALL_PARQUET_GLOB_PATTERN]:
              # General query across all files
-             TABLE_DEFINITION = f"The data source is ALWAYS loaded as a single unified table using: 'read_parquet('{Config.ALL_PARQUET_GLOB_PATTERN}', union_by_name=true)'"
+             TABLE_DEFINITION = f"The data source is ALWAYS loaded as a single unified table using: 'read_parquet('{config.ALL_PARQUET_GLOB_PATTERN}', union_by_name=true)'"
         else:
             # Single file or explicit multi-file without join key
             TABLE_DEFINITION = f"The source data is the set of files: {paths_str}. They are loaded as one unified table using: 'read_parquet([{paths_str}], union_by_name=true)'"
@@ -233,7 +233,7 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
 
     # 5. Call LLM for SQL
     response = llm_client.chat.completions.create(
-        model=Config.LLM_DEPLOYMENT_NAME,
+        model=config.LLM_DEPLOYMENT_NAME,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_question}
@@ -248,16 +248,17 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
     if sql_query.endswith("```"):
         sql_query = sql_query[:-len("```")].strip()
         
-    result_df = execute_duckdb_query(sql_query)
+    result_df = execute_duckdb_query(sql_query, config) # <-- PASS CONFIG HERE
 
     total_duration = time.time() - start_time
     
     return user_question, result_df, total_duration, intent
 
 
-def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_parquet_files: List[str], global_catalog: str, excel_path: str) -> Dict[str, pd.DataFrame]:
+def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_parquet_files: List[str], global_catalog: str, excel_path: str, config: Config) -> Dict[str, pd.DataFrame]:
     """
     Orchestrates the new three-stage, multi-file query flow.
+    (Added config argument)
     """
     if not llm_client: 
         return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["FATAL: LLM client not initialized."]}) }
@@ -269,7 +270,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
     overall_start_time = time.time()
     
     # 1. FILE/TABLE IDENTIFICATION (New LLM Step)
-    required_tables_names, join_key = identify_required_tables(llm_client, user_question, Config.LLM_DEPLOYMENT_NAME, global_catalog)
+    required_tables_names, join_key = identify_required_tables(llm_client, user_question, config.LLM_DEPLOYMENT_NAME, global_catalog)
     
     # Map the logical names back to the actual file paths
     # Filter the master list of all_parquet_files to find the ones matching the logical names
@@ -279,7 +280,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
     
     if required_tables_names == ["*"]:
         # Querying all Parquet files using the glob pattern
-        target_parquet_files = [Config.ALL_PARQUET_GLOB_PATTERN]
+        target_parquet_files = [config.ALL_PARQUET_GLOB_PATTERN]
         use_union_by_name = True
         print(f"-> STEP 1: Identified ALL available files/tables via glob: {target_parquet_files[0]} (Mode: UNION_BY_NAME)")
     else:
@@ -305,11 +306,12 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
     parquet_schema, df_sample = get_parquet_context(
         target_parquet_files,
         use_union_by_name=use_union_by_name,
-        all_parquet_glob_pattern=Config.ALL_PARQUET_GLOB_PATTERN # Passed here
+        all_parquet_glob_pattern=config.ALL_PARQUET_GLOB_PATTERN, # Passed here
+        config=config # <-- PASS CONFIG HERE
     )
     
     # 3. DECOMPOSITION
-    sub_queries = decompose_multi_intent_query(llm_client, user_question, Config.LLM_DEPLOYMENT_NAME)
+    sub_queries = decompose_multi_intent_query(llm_client, user_question, config.LLM_DEPLOYMENT_NAME)
     
     if len(sub_queries) == 1 and sub_queries[0] == user_question:
         print("-> STEP 3: Single-Topic Flow Detected.")
@@ -327,7 +329,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
             executor.submit(
                 # Pass the join_key to process_single_query
                 process_single_query, 
-                llm_client, sub_query, parquet_schema, df_sample, target_parquet_files, excel_path, join_key
+                llm_client, sub_query, parquet_schema, df_sample, target_parquet_files, excel_path, join_key, config # <-- PASS CONFIG HERE
             ): sub_query for sub_query in sub_queries
         }
 
@@ -365,6 +367,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
 def main():
     
     Config.validate_env()
+    config = Config() # Instantiate the config object here
     
     llm_client = setup_llm_client()
     if not llm_client: sys.exit(1)
@@ -376,7 +379,7 @@ def main():
     # 1. PARALLEL FILE PROCESSING AND INGESTION
     MAX_WORKERS = 4 
     
-    print(f"[INFO] Starting parallel file processing for {len(Config.INPUT_FILE_PATHS)} files with {MAX_WORKERS} threads.")
+    print(f"[INFO] Starting parallel file processing for {len(config.INPUT_FILE_PATHS)} files with {MAX_WORKERS} threads.")
     
     
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -385,8 +388,9 @@ def main():
             executor.submit(
                 convert_excel_to_parquet, 
                 excel_input_path, 
-                Config.PARQUET_OUTPUT_DIR
-            ): excel_input_path for excel_input_path in Config.INPUT_FILE_PATHS
+                config.PARQUET_OUTPUT_DIR,
+                config # <--- CRITICAL FIX: Add the config object here
+            ): excel_input_path for excel_input_path in config.INPUT_FILE_PATHS
             if os.path.exists(excel_input_path)
         }
         
@@ -403,7 +407,7 @@ def main():
         sys.exit(1)
         
     # Step 2: Build the global catalog
-    global_catalog = build_global_catalog(all_parquet_files)
+    global_catalog = build_global_catalog(all_parquet_files, config) # <-- PASS CONFIG HERE
         
     print("\n" + "="*50)
     print("      GLOBAL DATA CATALOG LOADED")
@@ -417,15 +421,16 @@ def main():
     print("#"*50)
     
     # We use the path to the FIRST excel file for the excel_path argument in RAG lookup
-    first_excel_path = Config.INPUT_FILE_PATHS[0] 
+    first_excel_path = config.INPUT_FILE_PATHS[0] 
     
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
         llm_client,
-        "What is Maximum Discount for each price change reason",
+        "What is Maximum Discount for each price change reason and what is loan amount of Harrison, Ters.",
         all_parquet_files,
         global_catalog,
-        first_excel_path
+        first_excel_path,
+        config # <-- PASS CONFIG HERE
     )
     
     print("\n--- Execution Complete ---")
