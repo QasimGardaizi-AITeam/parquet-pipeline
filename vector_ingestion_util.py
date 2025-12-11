@@ -122,15 +122,14 @@ def ensure_vector_search_index(db, collection_name: str, embedding_dim: int = 15
                         "path": "embedding",
                         "numDimensions": embedding_dim,
                         "similarity": "cosine"
-                    },
-                    {"type": "filter", "path": "metadata"}
+                    }
                 ]
             }
 
             print(f"[INFO] Creating Atlas Vector Search Index '{index_name}' on '{collection_name}'...")
-            collection.create_search_index(
-                model=index_definition, 
-                name=index_name
+            collection.create_search_index( 
+                name=index_name,
+                definition=index_definition
             )
             index_creation_requested = True
             print(f"[SUCCESS] Index creation command sent. Atlas is building the index.")

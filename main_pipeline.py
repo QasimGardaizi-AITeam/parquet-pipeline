@@ -399,7 +399,7 @@ def main():
                 convert_excel_to_parquet, 
                 excel_input_path, 
                 config.PARQUET_OUTPUT_DIR,
-                config # <--- CRITICAL FIX: Add the config object here
+                config
             ): excel_input_path for excel_input_path in config.INPUT_FILE_PATHS
             if os.path.exists(excel_input_path)
         }
@@ -436,7 +436,7 @@ def main():
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
         llm_client,
-        "What is Maximum Discount offered when price changed due to Seasonal reasons and what is loan amount of Harrison, Ters.",
+        "What is Maximum Discount offered for each price change reason and what is loan amount of Harrison, Ters.",
         all_parquet_files,
         global_catalog,
         first_excel_path,
