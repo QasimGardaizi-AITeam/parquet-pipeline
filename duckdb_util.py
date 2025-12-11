@@ -45,10 +45,10 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
         conn.execute("LOAD azure;")
         
         # 2. Set Credentials using Connection String
-        connection_string = config.AZURE_STORAGE_CONNECTION_STRING
+        connection_string = config.azure_storage.connection_string
         
         if connection_string:
-            print(f"[INFO] Configuring persistent DuckDB Azure connection for storage: {config.AZURE_STORAGE_ACCOUNT_NAME}")
+            print(f"[INFO] Configuring persistent DuckDB Azure connection for storage: {config.azure_storage.account_name}")
             
             # Escape single quotes in the connection string by doubling them
             escaped_conn_str = connection_string.replace("'", "''")
@@ -60,8 +60,8 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
             # This ensures the connection is fully established before real queries run
             try:
                 # Test the connection by listing files (lightweight operation)
-                # warmup_glob = f"azure://{config.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{config.AZURE_STORAGE_CONTAINER_NAME}/*.parquet"
-                known_file = f"azure://{config.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{config.AZURE_STORAGE_CONTAINER_NAME}/parquet_files/file1_Sheet1.parquet"
+                # warmup_glob = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/*.parquet"
+                known_file = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/parquet_files/file1_Sheet1.parquet"
                 conn.execute(f"SELECT * FROM glob('{known_file}') LIMIT 1").fetchall()
                 print("[INFO] Azure connection warmed up and ready.")
             except Exception as warmup_err:
@@ -224,8 +224,8 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
         conn.execute("LOAD azure;")
         
         # Authenticate the thread-local connection
-        if config.AZURE_STORAGE_CONNECTION_STRING:
-            escaped_conn_str = config.AZURE_STORAGE_CONNECTION_STRING.replace("'", "''")
+        if config.azure_storage.connection_string:
+            escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
             conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
         
     except Exception as e:
@@ -274,9 +274,9 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
 
 def get_blob_uri(file_name: str, config: Any) -> str:
     """Constructs the full Azure Blob Storage URI for a given file name."""
-    account = config.AZURE_STORAGE_ACCOUNT_NAME
-    container = config.AZURE_STORAGE_CONTAINER_NAME
-    return f"azure://{account}.blob.core.windows.net/{container}/{config.PARQUET_OUTPUT_DIR}{file_name}"
+    account = config.azure_storage.account_name
+    container = config.azure_storage.container_name
+    return f"azure://{account}.blob.core.windows.net/{container}/{config.azure_storage.parquet_output_dir}{file_name}"
 
 def upload_file_to_azure(local_path: str, remote_file_path: str, config: Any) -> str:
     """
@@ -284,13 +284,13 @@ def upload_file_to_azure(local_path: str, remote_file_path: str, config: Any) ->
     Returns the full Azure URI on success. (This function is thread-safe)
     """
     try:
-        connection_string = config.AZURE_STORAGE_CONNECTION_STRING
-        container_name = config.AZURE_STORAGE_CONTAINER_NAME
+        connection_string = config.azure_storage.connection_string
+        container_name = config.azure_storage.container_name
 
         blob_service_client = BlobServiceClient.from_connection_string(connection_string)
         container_client = blob_service_client.get_container_client(container_name)
         
-        blob_path = f"{config.PARQUET_OUTPUT_DIR}{remote_file_path}"
+        blob_path = f"{config.azure_storage.parquet_output_dir}{remote_file_path}"
         
         # print(f"[INFO] Uploading {os.path.basename(local_path)} to Azure Blob: {blob_path}")
 

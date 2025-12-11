@@ -23,17 +23,21 @@ class VectorDBType(Enum):
 @dataclass
 class AzureOpenAIConfig:
     """Azure OpenAI configuration for LLM and embeddings"""
+    
+    # --- Non-default fields (Must be defined first) ---
     # LLM (GPT-4o) Configuration
     llm_endpoint: str
     llm_api_key: str
     llm_deployment_name: str
-    llm_api_version: str = "2024-08-01-preview"
-    llm_model_name: str = "gpt-4o"
-
+    
     # Embedding Configuration
     embedding_endpoint: str
     embedding_api_key: str
     embedding_deployment_name: str
+
+    # --- Default fields (Must be defined last) ---
+    llm_api_version: str = "2024-08-01-preview"
+    llm_model_name: str = "gpt-4o"
     embedding_api_version: str = "2024-02-01"
 
     @classmethod
@@ -47,6 +51,8 @@ class AzureOpenAIConfig:
 
         # Embedding settings
         embedding_resource = os.getenv("OPENAI_EMBEDDING_RESOURCE")
+        # NOTE: embedding_endpoint is set conditionally, but the dataclass definition requires it to be supplied
+        # The logic here makes it None if the resource is missing, which is validated below.
         embedding_endpoint = f"https://{embedding_resource}.openai.azure.com/" if embedding_resource else None
         embedding_api_key = os.getenv("OPENAI_EMBEDDING_API_KEY")
         embedding_deployment_name = os.getenv("OPENAI_EMBEDDING_MODEL")
@@ -74,9 +80,12 @@ class AzureOpenAIConfig:
 @dataclass
 class AzureStorageConfig:
     """Azure Blob Storage configuration"""
+    # Non-default fields
     account_name: str
     container_name: str
     connection_string: str
+    
+    # Default fields
     account_key: Optional[str] = None
     parquet_output_dir: str = "parquet_files/"
 
@@ -110,7 +119,10 @@ class AzureStorageConfig:
 @dataclass
 class MongoDBConfig:
     """MongoDB Atlas configuration"""
+    # Non-default fields
     uri: str
+    
+    # Default fields
     database_name: str = "vector_rag_db"
     vector_index_name: str = "vector_index"
 
@@ -134,6 +146,7 @@ class MongoDBConfig:
 @dataclass
 class ChromaDBConfig:
     """ChromaDB configuration"""
+    # Default fields
     persist_directory: str = "./chroma_db"
     collection_prefix: str = "data_source"
     anonymized_telemetry: bool = False
@@ -153,7 +166,10 @@ class ChromaDBConfig:
 @dataclass
 class VectorDBConfig:
     """Vector database configuration - supports MongoDB or ChromaDB"""
+    # Non-default fields
     db_type: VectorDBType
+    
+    # Default fields
     mongodb: Optional[MongoDBConfig] = None
     chromadb: Optional[ChromaDBConfig] = None
 
@@ -176,11 +192,12 @@ class VectorDBConfig:
 @dataclass
 class AppConfig:
     """Main application configuration"""
-    # Sub-configurations
+    # Non-default fields (Sub-configurations)
     azure_openai: AzureOpenAIConfig
     azure_storage: AzureStorageConfig
     vector_db: VectorDBConfig
 
+    # Default fields
     # Application settings
     input_file_paths: List[str] = field(default_factory=lambda: [
         '../sheets/file1.xlsx',

@@ -10,21 +10,36 @@ from typing import List, Dict
 load_dotenv()
 
 try:
-# --- 1. Configuration & Client Setup ---
-
-from config import get_config, VectorDBType
-
-# Get config
-config = get_config(VectorDBType.CHROMADB)
-
+    # --- 1. Configuration & Client Setup ---
+    from config import get_config, VectorDBType
+    # Get config
+    config = get_config(VectorDBType.CHROMADB)
+except ImportError:
+    print("[FATAL ERROR] Cannot import 'config' module. Ensure 'config.py' is accessible.")
     sys.exit(1)
+
+
+# --- ADDED: Initialize Azure OpenAI client for embedding generation ---
+try:
+    openai_client = AzureOpenAI(
+        azure_endpoint=config.azure_openai.embedding_endpoint,
+        api_key=config.azure_openai.embedding_api_key,
+        api_version=config.azure_openai.embedding_api_version
+    )
+    print(f"[INFO] Azure OpenAI client initialized for embedding (Retrieval Utility).")
+except Exception as e:
+    print(f"FATAL ERROR (ChromaDB Retrieval): Error initializing Azure OpenAI client: {e}")
+    sys.exit(1)
+# ---------------------------------------------------------------------
+
 
 try:
     # Initialize ChromaDB client with persistence
     chroma_client = chromadb.PersistentClient(
         path=config.vector_db.chromadb.persist_directory,
         settings=Settings(
-            anonymized_telemetry=False
+            # Using config for telemetry for consistency
+            anonymized_telemetry=config.vector_db.chromadb.anonymized_telemetry 
         )
     )
     print(f"[INFO] ChromaDB client initialized for retrieval. Persistence directory: {config.vector_db.chromadb.persist_directory}")
@@ -36,6 +51,7 @@ except Exception as e:
 # 2. Retrieval Functions
 def get_query_embedding(query: str) -> List[float]:
     """Generates the vector embedding for the query using Azure OpenAI."""
+    # The 'openai_client' is now defined globally above, resolving the NameError.
     try:
         response = openai_client.embeddings.create(
             model=config.azure_openai.embedding_deployment_name,
