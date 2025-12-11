@@ -4,7 +4,6 @@ import sys
 import json
 from openai import AzureOpenAI
 import atexit
-from dotenv import load_dotenv
 from typing import Literal, Tuple, List, Dict
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed 
@@ -470,7 +469,7 @@ def main():
     # Example: Multi-Intent Query
     generate_and_execute_query(
         llm_client,
-        "what's the max discount on each price change reason",
+        "what's loan amount of Kathleen Vasqez",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access

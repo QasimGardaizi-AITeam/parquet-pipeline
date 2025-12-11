@@ -1,6 +1,5 @@
 import os
 import sys
-from dotenv import load_dotenv
 from openai import AzureOpenAI
 from pymongo import MongoClient
 from typing import List, Dict

@@ -1,13 +1,11 @@
 import os
 import sys
-from dotenv import load_dotenv
 from openai import AzureOpenAI
 import chromadb
 from chromadb.config import Settings
 from typing import List, Dict, Tuple, Optional
 
 # --- 1. Configuration and Initialization ---
-load_dotenv()
 
 try:
     from config import get_config, VectorDBType
@@ -408,77 +406,3 @@ def get_semantic_context_and_files(
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-
-def list_chroma_collections() -> List[str]:
-    """
-    Lists all available collections in ChromaDB.
-    Useful for debugging and understanding what data is available.
-    """
-    try:
-        collections = chroma_client.list_collections()
-        collection_names = [col.name for col in collections]
-        print(f"[INFO] Available ChromaDB collections: {collection_names}")
-        return collection_names
-    except Exception as e:
-        print(f"[ERROR] Failed to list ChromaDB collections: {e}")
-        return []
-
-
-def get_collection_info(collection_name: str) -> Dict:
-    """
-    Gets information about a specific ChromaDB collection.
-    """
-    try:
-        collection = chroma_client.get_collection(name=collection_name)
-        count = collection.count()
-        metadata = collection.metadata
-
-        info = {
-            "name": collection_name,
-            "count": count,
-            "metadata": metadata
-        }
-
-        print(f"[INFO] Collection '{collection_name}': {count} documents, metadata: {metadata}")
-        return info
-
-    except Exception as e:
-        print(f"[ERROR] Failed to get info for collection '{collection_name}': {e}")
-        return {}
-
-
-def search_all_collections(query: str, limit: int = 3, collection_prefix: str = None) -> Dict[str, List[Dict]]:
-    """
-    Searches across all collections and returns results grouped by collection.
-    Useful for debugging and understanding data distribution.
-    """
-    if collection_prefix is None:
-        collection_prefix = config.vector_db.chromadb.collection_prefix
-    
-    query_vector = get_query_embedding(query)
-    if not query_vector:
-        return {}
-    
-    try:
-        all_collections = chroma_client.list_collections()
-        collection_names = [col.name for col in all_collections if col.name.startswith(collection_prefix)]
-        
-        results_by_collection = {}
-        
-        for collection_name in collection_names:
-            docs = retrieve_chunks_from_chroma(collection_name, query_vector, limit=limit)
-            if docs:
-                results_by_collection[collection_name] = docs
-        
-        # Print summary
-        print(f"[INFO] Search results across {len(results_by_collection)} collections:")
-        for coll_name, docs in results_by_collection.items():
-            logical_table = extract_logical_table_from_collection(coll_name, collection_prefix)
-            top_score = docs[0]['score'] if docs else 0
-            print(f"  - {logical_table}: {len(docs)} results (top score: {top_score:.4f})")
-        
-        return results_by_collection
-        
-    except Exception as e:
-        print(f"[ERROR] Failed to search all collections: {e}")
-        return {}
