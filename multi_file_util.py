@@ -38,26 +38,13 @@ def identify_required_tables(llm_client: AzureOpenAI, user_question: str, deploy
     
     SYSTEM_PROMPT = f"""
         You are a data source selection agent. Your task is to identify ALL logical tables needed to answer the user's question based on the Data Catalog.
-
         --- DATA CATALOG ---
         {catalog_schema}
         --- END CATALOG ---
-
         CRITICAL RULES:
         1. **Analyze ALL filtering criteria** in the user's question (dates, product types, names, categories, etc.)
         2. **Map each filter to its column**: Identify which table contains each column needed for filtering
-        3. **Include ALL tables**: If filters require columns from multiple tables, you MUST list ALL of them
-        4. **Specify join_key**: When multiple tables are required, you MUST provide the common column (e.g., 'product_id') that links them
-        5. **Use '*'** only if the query applies generally across all data without specific table requirements
-
-        EXAMPLE:
-        - Query: "all demand increase products on 13 Mar 2025"
-        - Filters: "demand increase" (needs price_change_reason column) AND "13 Mar 2025" (needs date column)
-        - If file1 has 'date' and file2 has 'price_change_reason', BOTH tables are required
-        - Result: tables_required: ["file1_Sheet1", "file2_Sheet1"], join_key: "product_id"
-
-        Call the 'identify_data_sources' tool exactly once with ALL required tables.
-        """
+        3. **Include ALL tables**: If filters require columns from multiple tables, you MUST list ALL of them"""
     
     try:
         response = llm_client.chat.completions.create(
