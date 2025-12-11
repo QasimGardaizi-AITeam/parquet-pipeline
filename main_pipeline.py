@@ -469,7 +469,7 @@ def main():
     # Example: Multi-Intent Query
     generate_and_execute_query(
         llm_client,
-        "what's loan amount of Kathleen Vasqez",
+        "Kathleen Vasqez",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access

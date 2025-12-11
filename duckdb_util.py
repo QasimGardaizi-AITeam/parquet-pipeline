@@ -191,7 +191,6 @@ def execute_duckdb_query(query: str, config: Any) -> pd.DataFrame:
         conn = setup_duckdb_azure_connection(config)
         
         # Execute query
-        print('-'*50+'SQL Query'+'-'*50+'\n'+query)
         result_df = conn.execute(query).fetchdf()
         
         # NOTE: Connection remains open
