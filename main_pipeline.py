@@ -503,7 +503,7 @@ def main():
         global_catalog,
         first_excel_path,
         config,
-        enable_debug=True  # Enable debug mode to inspect JOIN issues
+        enable_debug=False  # Set to True to enable detailed debug output (slower)
     )
     
     print("\n--- Execution Complete ---")
