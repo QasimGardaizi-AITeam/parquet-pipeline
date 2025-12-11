@@ -260,29 +260,29 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
     return user_question, result_df, total_duration, intent
 
 
-def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_parquet_files: List[str], global_catalog: str, excel_path: str, config: Config) -> Dict[str, pd.DataFrame]:
+def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_parquet_files: List[str], global_catalog: str, excel_path: str, config: Config, enable_debug: bool = False) -> Dict[str, pd.DataFrame]:
     """
     Orchestrates the new three-stage, multi-file query flow.
-    (Added config argument)
+    (Added config argument and enable_debug flag)
     """
-    if not llm_client: 
+    if not llm_client:
         return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["FATAL: LLM client not initialized."]}) }
 
     print("\n" + "="*80)
     print(f"       *** ORCHESTRATION START: '{user_question}' ***")
     print("="*80)
-    
+
     overall_start_time = time.time()
-    
+
     # 1. FILE/TABLE IDENTIFICATION (New LLM Step)
     required_tables_names, join_key = identify_required_tables(llm_client, user_question, config.LLM_DEPLOYMENT_NAME, global_catalog)
-    
+
     # Map the logical names back to the actual file paths
     # Filter the master list of all_parquet_files to find the ones matching the logical names
-    
+
     target_parquet_files = []
     use_union_by_name = False
-    
+
     if required_tables_names == ["*"]:
         # Querying all Parquet files using the glob pattern
         target_parquet_files = [config.ALL_PARQUET_GLOB_PATTERN]
@@ -314,7 +314,66 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
         all_parquet_glob_pattern=config.ALL_PARQUET_GLOB_PATTERN, # Passed here
         config=config # <-- PASS CONFIG HERE
     )
-    
+
+    # DEBUG: Data inspection (only runs if enable_debug=True)
+    if enable_debug and len(target_parquet_files) >= 2 and join_key:
+        print("\n" + "="*80)
+        print("       *** DEBUG MODE: DATA INSPECTION ***")
+        print("="*80)
+
+        from duckdb_util import execute_duckdb_query
+
+        for i, p_path in enumerate(target_parquet_files[:2], 1):  # Check first 2 files
+            table_name = os.path.splitext(os.path.basename(p_path))[0]
+            print(f"\n--- DEBUG: Table {i} ({table_name}) ---")
+
+            # Count rows and unique join keys
+            debug_query = f"""
+            SELECT
+                COUNT(*) as total_rows,
+                COUNT(DISTINCT {join_key}) as unique_{join_key}s,
+                COUNT({join_key}) as non_null_{join_key}s
+            FROM read_parquet('{p_path}')
+            """
+            result = execute_duckdb_query(debug_query, config)
+            print(result.to_string(index=False))
+
+            # Sample join key values
+            sample_query = f"SELECT DISTINCT {join_key} FROM read_parquet('{p_path}') LIMIT 5"
+            sample_keys = execute_duckdb_query(sample_query, config)
+            print(f"\nSample {join_key} values:")
+            print(sample_keys.to_string(index=False))
+
+        # Check for common join keys between first two tables
+        if len(target_parquet_files) >= 2:
+            print(f"\n--- DEBUG: Common {join_key} values between tables ---")
+            common_query = f"""
+            SELECT COUNT(*) as common_{join_key}_count
+            FROM (
+                SELECT DISTINCT {join_key}
+                FROM read_parquet('{target_parquet_files[0]}')
+            ) T1
+            INNER JOIN (
+                SELECT DISTINCT {join_key}
+                FROM read_parquet('{target_parquet_files[1]}')
+            ) T2
+            ON T1.{join_key} = T2.{join_key}
+            """
+            common_result = execute_duckdb_query(common_query, config)
+            print(common_result.to_string(index=False))
+
+            # Check data types
+            print(f"\n--- DEBUG: Data types for {join_key} ---")
+            for i, p_path in enumerate(target_parquet_files[:2], 1):
+                table_name = os.path.splitext(os.path.basename(p_path))[0]
+                type_query = f"DESCRIBE (SELECT {join_key} FROM read_parquet('{p_path}') LIMIT 1)"
+                type_result = execute_duckdb_query(type_query, config)
+                print(f"Table {i} ({table_name}): {type_result['column_type'][0]}")
+
+        print("\n" + "="*80)
+        print("       *** END DEBUG MODE ***")
+        print("="*80 + "\n")
+
     # 3. DECOMPOSITION
     sub_queries = decompose_multi_intent_query(llm_client, user_question, config.LLM_DEPLOYMENT_NAME)
     
@@ -439,12 +498,12 @@ def main():
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
         llm_client,
-        # "What is Maximum Discount offered for each price change reason and what is loan amount of Harrison, Ters.",
-        "all demand increase products on 13 Mar 2025",
+        "What is Maximum Discount offered for each price change reason and what is loan amount of Harrison, Ters.",
         all_parquet_files,
         global_catalog,
         first_excel_path,
-        config 
+        config,
+        enable_debug=True  # Enable debug mode to inspect JOIN issues
     )
     
     print("\n--- Execution Complete ---")
