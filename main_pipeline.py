@@ -220,7 +220,7 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         {schema}
         --- END OF SCHEMA ---
 
-        -- Sample Data (Top 5 rows for general structure) --
+        -- Sample Data (Top 100 rows for general structure) --
         {df_sample.to_markdown(index=False)}
         -- End of Sample Data --
 
@@ -230,7 +230,8 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         1. **STRICTLY USE ONLY THE COLUMN NAMES** found in the "DYNAMIC DATABASE SCHEMA".
         2. **STRICTLY FOLLOW THE TABLE DEFINITION** in your FROM/JOIN clauses. If table aliases (T1, T2) are provided, you MUST use them and their corresponding join key.
         3. **SEMANTIC FILTERING (RAG):** If the **CONTEXTUAL SAMPLE DATA HINT** is present, you **MUST** use the exact, canonical values from the hint to form a precise `WHERE...IN (...)` clause. 
-        4. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query.
+        4. **UNDERSTAND FORMATS:** for example if a user has given you a value to search look in sample to see what value it aligns with like (3 dec 25 can be in format 2025-12-03 or any other date format, 'Word' can be word, WORD etc)
+        5. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query.
         """
 
     # 5. Call LLM for SQL
@@ -436,7 +437,8 @@ def main():
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
         llm_client,
-        "What is Maximum Discount offered for each price change reason and what is loan amount of Harrison, Ters.",
+        # "What is Maximum Discount offered for each price change reason and what is loan amount of Harrison, Ters.",
+        "all demand increase products on 13 Mar 2025",
         all_parquet_files,
         global_catalog,
         first_excel_path,

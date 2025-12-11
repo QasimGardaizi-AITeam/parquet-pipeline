@@ -114,7 +114,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                             for index, row in schema_df.iterrows()]
             schema_string = f"TABLE SCHEMA (UNIONED):\n" + "\n".join(schema_lines)
             
-            df_sample = conn.execute(f"{query} LIMIT 5").fetchdf()
+            df_sample = conn.execute(f"{query} LIMIT 50").fetchdf()
             
         else:
             # --- JOIN MODE ---
@@ -155,7 +155,7 @@ def execute_duckdb_query(query: str, config: Any) -> pd.DataFrame:
         conn = setup_duckdb_azure_connection(config)
         
         # Execute query
-        print('SQL Query'+query)
+        print('-'*50+'SQL Query'+'-'*50+'\n'+query)
         result_df = conn.execute(query).fetchdf()
         
         # NOTE: Connection remains open
