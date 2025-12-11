@@ -8,10 +8,10 @@ from azure.storage.blob import BlobServiceClient
 import atexit 
 import time
 
-# Placeholder/Fallback for vector_ingestion_util
+# Vector Database Ingestion - Using ChromaDB (Switch to vector_ingestion_util for MongoDB)
 try:
-    # Assuming this module exists in your pipeline directory
-    from vector_ingestion_util import ingest_to_vector_db 
+    # ChromaDB version (alternative: use vector_ingestion_util for MongoDB)
+    from chroma_ingestion_util import ingest_to_chroma_db as ingest_to_vector_db
 except ImportError:
     def ingest_to_vector_db(file_path, sheet_name=None):
         print(f"[WARNING] Using internal fallback ingestion for {file_path}.")

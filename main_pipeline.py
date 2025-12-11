@@ -47,9 +47,10 @@ except ImportError:
         return ["*"], ""
 
 
-# Placeholder/Fallback for retrieval (ingestion is now imported in duckdb_util)
+# Vector Database Retrieval - Using ChromaDB (Switch to retrival_util for MongoDB)
 try:
-    from retrival_util import get_semantic_context_for_query 
+    # ChromaDB version (alternative: use retrival_util for MongoDB)
+    from chroma_retrieval_util import get_semantic_context_for_query_chroma as get_semantic_context_for_query
 except ImportError:
     def get_semantic_context_for_query(query, file_name, limit):
         print("[WARNING] Using fallback semantic context.")
