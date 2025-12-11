@@ -1,12 +1,13 @@
 import os
 import pandas as pd
 import duckdb
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Dict
 import glob
 import sys 
 from azure.storage.blob import BlobServiceClient 
 import atexit 
 import time
+import threading # <-- ADDED: Import threading for concurrency control
 
 # Vector Database Ingestion - Using ChromaDB (Switch to vector_ingestion_util for MongoDB)
 try:
@@ -20,6 +21,8 @@ except ImportError:
 # --- NEW: Global variable to store the persistent connection ---
 PERSISTENT_DUCKDB_CONN = None
 
+# --- NEW: Global Lock for Connection Setup ---
+CONN_LOCK = threading.Lock()
 # -----------------------------------------------
 # 1. CORE DUCKDB UTILITIES (MODIFIED FOR PERSISTENCE)
 # -----------------------------------------------
@@ -32,56 +35,63 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
     """
     global PERSISTENT_DUCKDB_CONN
     
+    # 1. Quick check without lock
     if PERSISTENT_DUCKDB_CONN is not None:
         # Connection already established and authenticated
         return PERSISTENT_DUCKDB_CONN
 
-    try:
-        # Create the connection
-        conn = duckdb.connect()
-        
-        # 1. Install and Load Azure Extension
-        conn.execute("INSTALL azure;")
-        conn.execute("LOAD azure;")
-        
-        # 2. Set Credentials using Connection String
-        connection_string = config.azure_storage.connection_string
-        
-        if connection_string:
-            print(f"[INFO] Configuring persistent DuckDB Azure connection for storage: {config.azure_storage.account_name}")
+    # 2. Acquire lock to serialize the connection initialization process
+    with CONN_LOCK:
+        # 3. Re-check after acquiring the lock (in case another thread initialized it)
+        if PERSISTENT_DUCKDB_CONN is not None:
+            return PERSISTENT_DUCKDB_CONN
+
+        try:
+            # Create the connection
+            conn = duckdb.connect()
             
-            # Escape single quotes in the connection string by doubling them
-            escaped_conn_str = connection_string.replace("'", "''")
-            conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+            # 1. Install and Load Azure Extension
+            conn.execute("INSTALL azure;")
+            conn.execute("LOAD azure;")
+            
+            # 2. Set Credentials using Connection String
+            connection_string = config.azure_storage.connection_string
+            
+            if connection_string:
+                print(f"[INFO] Configuring persistent DuckDB Azure connection for storage: {config.azure_storage.account_name}")
+                
+                # Escape single quotes in the connection string by doubling them
+                escaped_conn_str = connection_string.replace("'", "''")
+                conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
 
-            print("[SUCCESS] Persistent DuckDB Azure authentication configured successfully.")
+                print("[SUCCESS] Persistent DuckDB Azure authentication configured successfully.")
 
-            # CRITICAL FIX: Warm up the Azure connection with a lightweight test query
-            # This ensures the connection is fully established before real queries run
-            try:
-                # Test the connection by listing files (lightweight operation)
-                # warmup_glob = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/*.parquet"
-                known_file = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/parquet_files/file1_Sheet1.parquet"
-                conn.execute(f"SELECT * FROM glob('{known_file}') LIMIT 1").fetchall()
-                print("[INFO] Azure connection warmed up and ready.")
-            except Exception as warmup_err:
-                # Non-fatal: connection might still work for actual queries
-                print(f"[WARNING] Connection warm-up failed (non-fatal): {warmup_err}")
+                # CRITICAL FIX: Warm up the Azure connection with a lightweight test query
+                # This ensures the connection is fully established before real queries run
+                try:
+                    # Test the connection by listing files (lightweight operation)
+                    # warmup_glob = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/*.parquet"
+                    known_file = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/parquet_files/file1_Sheet1.parquet"
+                    conn.execute(f"SELECT * FROM glob('{known_file}') LIMIT 1").fetchall()
+                    print("[INFO] Azure connection warmed up and ready.")
+                except Exception as warmup_err:
+                    # Non-fatal: connection might still work for actual queries
+                    print(f"[WARNING] Connection warm-up failed (non-fatal): {warmup_err}")
 
-            # Store the connection globally for reuse
-            PERSISTENT_DUCKDB_CONN = conn
-            return conn
-        else:
-            print("[CRITICAL ERROR] DuckDB Azure connection failed: Missing AZURE_STORAGE_CONNECTION_STRING in config.")
-            raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
-             
-    except Exception as e:
-        import traceback
-        traceback.print_exc(file=sys.stdout)
-        print(f"[CRITICAL ERROR] Failed to set up DuckDB connection: {e}")
-        # Ensure the global connection is None on failure
-        PERSISTENT_DUCKDB_CONN = None 
-        raise  # Re-raise to stop execution if auth fails
+                # Store the connection globally for reuse
+                PERSISTENT_DUCKDB_CONN = conn
+                return conn
+            else:
+                print("[CRITICAL ERROR] DuckDB Azure connection failed: Missing AZURE_STORAGE_CONNECTION_STRING in config.")
+                raise ValueError("AZURE_STORAGE_CONNECTION_STRING is required")
+                 
+        except Exception as e:
+            import traceback
+            traceback.print_exc(file=sys.stdout)
+            print(f"[CRITICAL ERROR] Failed to set up DuckDB connection: {e}")
+            # Ensure the global connection is None on failure
+            PERSISTENT_DUCKDB_CONN = None 
+            raise  # Re-raise to stop execution if auth fails
 
 def close_persistent_duckdb_connection():
     """Closes the globally stored DuckDB connection."""
@@ -303,21 +313,37 @@ def upload_file_to_azure(local_path: str, remote_file_path: str, config: Any) ->
         raise Exception(f"Azure Upload Failed for {local_path}: {e}")
 
 
-def build_global_catalog(parquet_files: List[str], config: Any) -> str:
-    """Generates a simplified, LLM-readable catalog of all available logical tables."""
-    catalog = []
+def build_global_catalog(parquet_paths: List[str], config: Any) -> Tuple[str, Dict[str, str]]:
+    """
+    Builds a global data catalog from Parquet files.
     
-    # 1. Get the persistent connection
-    conn = setup_duckdb_azure_connection(config)
-
-    for p_path in parquet_files:
-        logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0]
-        try:
-            schema_df = conn.execute(f"DESCRIBE (SELECT * FROM read_parquet('{p_path}'))").fetchdf()
+    Returns:
+        Tuple of (formatted_string_for_display, dictionary_for_programmatic_access)
+    """
+    try:
+        conn = setup_duckdb_azure_connection(config)
+        
+        catalog_lines = []
+        catalog_dict = {}  # NEW: Dictionary for programmatic access
+        
+        for p_path in parquet_paths:
+            logical_name = os.path.splitext(os.path.basename(p_path))[0]
+            
+            describe_query = f"DESCRIBE (SELECT * FROM read_parquet('{p_path}'))"
+            schema_df = conn.execute(describe_query).fetchdf()
+            
             columns = ', '.join(schema_df['column_name'].tolist())
-            catalog.append(f"Logical Table: {logical_name} (Columns: {columns})")
-        except Exception as e:
-            catalog.append(f"Logical Table: {logical_name} (ERROR: Failed to read schema: {e})")
-
-    # NOTE: Connection remains open
-    return "\n".join(catalog)
+            catalog_lines.append(f"Logical Table: {logical_name} (Columns: {columns})")
+            
+            # NEW: Add to dictionary
+            catalog_dict[logical_name] = {
+                'parquet_path': p_path,
+                'columns': schema_df['column_name'].tolist()
+            }
+        
+        catalog_string = '\n'.join(catalog_lines)
+        return catalog_string, catalog_dict
+        
+    except Exception as e:
+        print(f"[ERROR] Failed to build global catalog: {e}")
+        return "Failed to build catalog", {}

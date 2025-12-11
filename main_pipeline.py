@@ -4,15 +4,12 @@ import sys
 import json
 from openai import AzureOpenAI
 import atexit
-# import uuid
-# from datetime import datetime
 from dotenv import load_dotenv
 from typing import Literal, Tuple, List, Dict
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed 
 
 # --- NEW UTILITY IMPORTS ---
-# Import all DuckDB/Data Processing functions from the new utility file
 try:
     from duckdb_util import (
         get_parquet_context,
@@ -25,10 +22,8 @@ try:
 except ImportError:
     print("[FATAL] Missing duckdb_util.py. Please create the file.")
     sys.exit(1)
-# -------------------------
 
-
-# Placeholder/Fallback logic for decomposition_util
+# Decomposition utility
 try:
     from decomposition_util import decompose_multi_intent_query 
 except ImportError:
@@ -36,31 +31,36 @@ except ImportError:
         print("[WARNING] Using fallback decomposition. Create decomposition_util.py for full functionality.")
         return [user_question] 
 
-# Placeholder/Fallback for multi_file_util
+# Multi-file utility
 try:
     from multi_file_util import identify_required_tables 
 except ImportError:
-    # Fallback function for file identification
     def identify_required_tables(llm_client, user_question, deployment_name, catalog_schema) -> Tuple[List[str], str]:
-        # Default to querying all available Parquet files
         print("[WARNING] Using fallback file identification. Defaulting to all files ('*').")
         return ["*"], ""
 
-
-# Vector Database Retrieval - Using ChromaDB (Switch to retrival_util for MongoDB)
+# Vector Database Retrieval - Using NEW SMART RETRIEVAL with ChromaDB
 try:
-    # ChromaDB version (alternative: use retrival_util for MongoDB)
-    from chroma_retrieval_util import get_semantic_context_for_query_chroma as get_semantic_context_for_query
-except ImportError:
-    def get_semantic_context_for_query(query, file_name, limit):
-        print("[WARNING] Using fallback semantic context.")
-        return ""
+    # FIXED: Use the correct filename
+    from chroma_retrieval_util import get_semantic_context_and_files
+    SMART_RETRIEVAL_AVAILABLE = True
+    print("[SUCCESS] Smart retrieval imported successfully!")
+except ImportError as e:
+    SMART_RETRIEVAL_AVAILABLE = False
+    print(f"[WARNING] Smart retrieval not available: {e}")
+    try:
+        from chroma_retrieval_util import get_semantic_context_for_query_chroma as get_semantic_context_for_query
+        print("[INFO] Using legacy retrieval method")
+    except ImportError:
+        def get_semantic_context_for_query(query, file_name, limit):
+            print("[WARNING] Using fallback semantic context.")
+            return ""
 
 # Import universal configuration
 from config import get_config, Config, VectorDBType
 
 # Initialize configuration
-config = get_config(VectorDBType.CHROMADB)  # Change to MONGODB to switch
+config = get_config(VectorDBType.CHROMADB)
 
 # 1. CLIENT SETUP AND UTILITIES
 def setup_llm_client():
@@ -86,17 +86,21 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
     if not llm_client: return 'SQL_QUERY'
 
     ROUTER_SYSTEM_PROMPT = f"""
-        You are an intelligent routing agent. Your task is to classify the user's question based on the provided database context.
+        You are an intelligent routing agent. Your task is to classify the user's question intent based on the provided database context.
         --- DATABASE CONTEXT ---
         SCHEMA:
         {schema}
         
-        SAMPLE DATA (Top 5 Rows):
+        SAMPLE DATA (Top 50 Rows):
         {df_sample.to_markdown(index=False)}
         
         --- CLASSIFICATION RULES ---
-        1. **SEMANTIC_SEARCH**: Choose this intent if the query involves: fuzzy matching, potentially misspelled names (like 'Smithe'), or conceptual descriptions that require vector similarity (like 'high value collateral'). 
-        2. **SQL_QUERY**: Choose this intent if the query involves: direct calculations, aggregation functions (SUM, AVG, COUNT, MIN, MAX), or precise filtering on structured numeric or categorical columns.
+        1. **SEMANTIC_SEARCH**: Choose this intent if the query involves:
+           a. **Fuzzy Matching / Names**: Searching for specific entities like applicant names, or conceptual descriptions. This is critical for handling potential misspellings or variations in names.
+           b. **Conceptual lookups**: Finding a value based on a non-indexed, descriptive field.
+        2. **SQL_QUERY**: Choose this intent if the query involves:
+           a. **Direct calculations/Aggregation**: Functions like SUM, AVG, COUNT, MAX, MIN
+           b. **Precise Filtering**: Filtering on structured numeric, categorical, or date columns
 
         Your output MUST be a single JSON object with the key 'intent'.
         Example: {{"intent": "SEMANTIC_SEARCH"}}
@@ -119,12 +123,19 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
     except Exception as e:
         return 'SQL_QUERY'
 
-def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: str, df_sample: pd.DataFrame, 
-                         parquet_files: List[str], excel_path: str, join_key: str, config: Config) -> Tuple[str, pd.DataFrame, float, str]:
+def process_single_query(
+    llm_client: AzureOpenAI, 
+    user_question: str, 
+    schema: str, 
+    df_sample: pd.DataFrame, 
+    parquet_files: List[str], 
+    global_catalog_dict: Dict,  # CHANGED: Now expects a dict, not string
+    join_key: str, 
+    config: Config
+) -> Tuple[str, pd.DataFrame, float, str]:
     """
     CORE WORKER: Processes a single, atomic query through the Hybrid RAG pipeline.
-    CRITICAL UPDATE: Logic to build TABLE_DEFINITION for JOIN vs. UNION.
-    (Added config argument for execute_duckdb_query)
+    UPDATED: Now uses smart retrieval that automatically identifies correct files.
     """
     
     start_time = time.time()
@@ -134,24 +145,67 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
     
     AUGMENTATION_HINT = ""
     semantic_lookup_duration = 0
+    rag_identified_parquet_files = []
 
-    # 2. RAG Lookup (if needed)
+    # 2. RAG Lookup (if needed) - UPDATED WITH SMART RETRIEVAL
     if intent == 'SEMANTIC_SEARCH':
         lookup_start = time.time()
-        # IMPORTANT: Pass the path of the *primary* Excel file for RAG to know which vector index to query
-        semantic_context = get_semantic_context_for_query(user_question, file_name=excel_path, limit=7) 
-        semantic_lookup_duration = time.time() - lookup_start
         
-        if semantic_context:
-            AUGMENTATION_HINT = (
-                "\n*** CONTEXTUAL SAMPLE DATA HINT (Retrieved via Semantic Search): ***\n"
-                f"{semantic_context}\n"
-                "*** END HINT ***\n"
-            )
+        if SMART_RETRIEVAL_AVAILABLE:
+            # NEW: Use smart retrieval that returns both context AND the correct parquet files
+            print(f"[INFO] Using smart semantic retrieval for sub-query: '{user_question}'")
+            try:
+                semantic_context, rag_identified_parquet_files = get_semantic_context_and_files(
+                    query=user_question,
+                    file_name=None,  # Let it auto-detect
+                    catalog=global_catalog_dict,  # FIXED: Pass the dictionary, not string
+                    limit=7,
+                    score_threshold=0.5
+                )
+                
+                if semantic_context:
+                    AUGMENTATION_HINT = (
+                        "\n*** CONTEXTUAL SAMPLE DATA HINT (Retrieved via Semantic Search): ***\n"
+                        f"{semantic_context}\n"
+                        "*** END HINT ***\n"
+                    )
+                    
+                    # CRITICAL: If RAG identified specific files, use those instead
+                    if rag_identified_parquet_files:
+                        print(f"[INFO] RAG identified specific files: {rag_identified_parquet_files}")
+                        parquet_files = rag_identified_parquet_files
+                        
+                        # Update schema and sample for the correct files
+                        print(f"[INFO] Updating schema context for RAG-identified files...")
+                        schema, df_sample = get_parquet_context(
+                            parquet_files,
+                            use_union_by_name=True,
+                            all_parquet_glob_pattern=config.azure_storage.glob_pattern,
+                            config=config
+                        )
+                else:
+                    print(f"[WARNING] Smart retrieval found no relevant context")
+                    
+            except Exception as e:
+                print(f"[ERROR] Smart retrieval failed: {e}. Falling back to original files.")
+                import traceback
+                traceback.print_exc()
+        else:
+            # FALLBACK: Use old method
+            print(f"[WARNING] Smart retrieval unavailable. Using fallback method.")
+            rag_file_name = config.input_file_paths[0]
+            semantic_context = get_semantic_context_for_query(user_question, file_name=rag_file_name, limit=7)
             
-    # 3. Dynamic Table Source Definition (FIXED LOGIC)
-    
-    # Check if we should use the multi-file JOIN definition
+            if semantic_context:
+                AUGMENTATION_HINT = (
+                    "\n*** CONTEXTUAL SAMPLE DATA HINT (Retrieved via Semantic Search): ***\n"
+                    f"{semantic_context}\n"
+                    "*** END HINT ***\n"
+                )
+        
+        semantic_lookup_duration = time.time() - lookup_start
+            
+    # 3. Dynamic Table Source Definition
     if len(parquet_files) > 1 and join_key and not (parquet_files == [config.azure_storage.glob_pattern]):
         # Scenario: Multiple tables need a JOIN
         table_aliases = []
@@ -173,12 +227,9 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         paths_str = ', '.join(f"'{p}'" for p in parquet_files)
         
         if parquet_files == [config.azure_storage.glob_pattern]:
-             # General query across all files
              TABLE_DEFINITION = f"The data source is ALWAYS loaded as a single unified table using: 'read_parquet('{config.azure_storage.glob_pattern}', union_by_name=true)'"
         else:
-            # Single file or explicit multi-file without join key
             TABLE_DEFINITION = f"The source data is the set of files: {paths_str}. They are loaded as one unified table using: 'read_parquet([{paths_str}], union_by_name=true)'"
-
 
     # 4. SQL Generation System Prompt
     SYSTEM_PROMPT = f"""
@@ -192,7 +243,6 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         --- END OF SCHEMA ---
 
         -- Sample Data (Top 50 rows from each table) --
-        -- Note: In JOIN mode, __TABLE__ column shows which table each row is from (e.g., "T1:file1_Sheet1") --
         {df_sample.to_markdown(index=False)}
         -- End of Sample Data --
 
@@ -200,40 +250,58 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         
         **CRITICAL RULES FOR SQL GENERATION:**
         1. **STRICTLY USE ONLY THE COLUMN NAMES** found in the "DYNAMIC DATABASE SCHEMA".
-        2. **STRICTLY FOLLOW THE TABLE DEFINITION** in your FROM/JOIN clauses. If table aliases (T1, T2) are provided, you MUST use them and their corresponding join key.
+        2. **STRICTLY FOLLOW THE TABLE DEFINITION** in your FROM/JOIN clauses.
         3. **SEMANTIC FILTERING (RAG):** If the **CONTEXTUAL SAMPLE DATA HINT** is present, you **MUST** use the exact, canonical values from the hint to form a precise `WHERE...IN (...)` clause. 
-        4. **UNDERSTAND FORMATS:** for example if a user has given you a value to search look in sample to see what value it aligns with like (3 dec 25 can be in format 2025-12-03 or any other date format, 'Word' can be word, WORD etc)
+        4. **UNDERSTAND FORMATS:** Handle various date and text formats appropriately.
         5. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query.
         """
 
     # 5. Call LLM for SQL
-    response = llm_client.chat.completions.create(
-        model=config.azure_openai.llm_deployment_name,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_question}
-        ],
-        temperature=0.0
-    )
-    sql_query = response.choices[0].message.content.strip()
-    
-    # 6. Cleanup and Execution
-    if sql_query.lower().startswith("```sql"):
-        sql_query = sql_query[len("```sql"):].strip()
-    if sql_query.endswith("```"):
-        sql_query = sql_query[:-len("```")].strip()
+    try:
+        response = llm_client.chat.completions.create(
+            model=config.azure_openai.llm_deployment_name,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_question}
+            ],
+            temperature=0.0
+        )
+        sql_query = response.choices[0].message.content.strip()
         
-    result_df = execute_duckdb_query(sql_query, config) # <-- PASS CONFIG HERE
+        # 6. Cleanup and Execution
+        if sql_query.lower().startswith("```sql"):
+            sql_query = sql_query[len("```sql"):].strip()
+        if sql_query.endswith("```"):
+            sql_query = sql_query[:-len("```")].strip()
+        
+        print("-" * 50 + "SQL Query" + "-" * 50)
+        print(sql_query)
+            
+        result_df = execute_duckdb_query(sql_query, config)
 
-    total_duration = time.time() - start_time
-    
-    return user_question, result_df, total_duration, intent
+        total_duration = time.time() - start_time
+        
+        return user_question, result_df, total_duration, intent
+        
+    except Exception as e:
+        end_time = time.time()
+        duration = end_time - start_time
+        error_message = f"Failed to generate or execute SQL for query: {user_question}. Exception: {e}"
+        error_df = pd.DataFrame({'Error': [error_message]})
+        return user_question, error_df, duration, intent
 
 
-def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_parquet_files: List[str], global_catalog: str, excel_path: str, config: Config, enable_debug: bool = False) -> Dict[str, pd.DataFrame]:
+def generate_and_execute_query(
+    llm_client: AzureOpenAI, 
+    user_question: str, 
+    all_parquet_files: List[str], 
+    global_catalog_string: str,  # For LLM display
+    global_catalog_dict: Dict,   # For programmatic access
+    config: Config, 
+    enable_debug: bool = False
+) -> Dict[str, pd.DataFrame]:
     """
-    Orchestrates the new three-stage, multi-file query flow.
-    (Added config argument and enable_debug flag)
+    Orchestrates the multi-file query flow.
     """
     if not llm_client:
         return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["FATAL: LLM client not initialized."]}) }
@@ -244,24 +312,23 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
 
     overall_start_time = time.time()
 
-    # 1. FILE/TABLE IDENTIFICATION (New LLM Step)
-    required_tables_names, join_key = identify_required_tables(llm_client, user_question, config.azure_openai.llm_deployment_name, global_catalog)
-
-    # Map the logical names back to the actual file paths
-    # Filter the master list of all_parquet_files to find the ones matching the logical names
+    # 1. FILE/TABLE IDENTIFICATION
+    required_tables_names, join_key = identify_required_tables(
+        llm_client, 
+        user_question, 
+        config.azure_openai.llm_deployment_name, 
+        global_catalog_string  # Use string for LLM
+    )
 
     target_parquet_files = []
     use_union_by_name = False
 
     if required_tables_names == ["*"]:
-        # Querying all Parquet files using the glob pattern
         target_parquet_files = [config.azure_storage.glob_pattern]
         use_union_by_name = True
         print(f"-> STEP 1: Identified ALL available files/tables via glob: {target_parquet_files[0]} (Mode: UNION_BY_NAME)")
     else:
-        # A simple, direct mapping assumption for this example:
         for name in required_tables_names:
-            # Find the actual path in the list of all created files
             matching_paths = [p for p in all_parquet_files if os.path.splitext(os.path.basename(p))[0] == name]
             if matching_paths:
                 target_parquet_files.append(matching_paths[0])
@@ -271,88 +338,28 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
         
         print(f"-> STEP 1: Identified specific logical tables: {required_tables_names} -> {target_parquet_files} (Join Key: {join_key if join_key else 'N/A'} | Mode: {mode})")
 
-
     if not target_parquet_files:
         print("[CRITICAL] File identification resulted in no usable paths. Aborting.")
         return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["No relevant files could be identified."]}) }
         
-    # 2. Get SCHEMA and SAMPLE DATA for the identified tables
-    # CRITICAL: Pass the glob pattern to the util function
+    # 2. Get SCHEMA and SAMPLE DATA
     parquet_schema, df_sample = get_parquet_context(
         target_parquet_files,
         use_union_by_name=use_union_by_name,
-        all_parquet_glob_pattern=config.azure_storage.glob_pattern, # Passed here
-        config=config # <-- PASS CONFIG HERE
+        all_parquet_glob_pattern=config.azure_storage.glob_pattern,
+        config=config
     )
 
-    # DEBUG: Data inspection (only runs if enable_debug=True)
-    if enable_debug and len(target_parquet_files) >= 2 and join_key:
-        print("\n" + "="*80)
-        print("       *** DEBUG MODE: DATA INSPECTION ***")
-        print("="*80)
-
-        from duckdb_util import execute_duckdb_query
-
-        for i, p_path in enumerate(target_parquet_files[:2], 1):  # Check first 2 files
-            table_name = os.path.splitext(os.path.basename(p_path))[0]
-            print(f"\n--- DEBUG: Table {i} ({table_name}) ---")
-
-            # Count rows and unique join keys
-            debug_query = f"""
-            SELECT
-                COUNT(*) as total_rows,
-                COUNT(DISTINCT {join_key}) as unique_{join_key}s,
-                COUNT({join_key}) as non_null_{join_key}s
-            FROM read_parquet('{p_path}')
-            """
-            result = execute_duckdb_query(debug_query, config)
-            print(result.to_string(index=False))
-
-            # Sample join key values
-            sample_query = f"SELECT DISTINCT {join_key} FROM read_parquet('{p_path}') LIMIT 5"
-            sample_keys = execute_duckdb_query(sample_query, config)
-            print(f"\nSample {join_key} values:")
-            print(sample_keys.to_string(index=False))
-
-        # Check for common join keys between first two tables
-        if len(target_parquet_files) >= 2:
-            print(f"\n--- DEBUG: Common {join_key} values between tables ---")
-            common_query = f"""
-            SELECT COUNT(*) as common_{join_key}_count
-            FROM (
-                SELECT DISTINCT {join_key}
-                FROM read_parquet('{target_parquet_files[0]}')
-            ) T1
-            INNER JOIN (
-                SELECT DISTINCT {join_key}
-                FROM read_parquet('{target_parquet_files[1]}')
-            ) T2
-            ON T1.{join_key} = T2.{join_key}
-            """
-            common_result = execute_duckdb_query(common_query, config)
-            print(common_result.to_string(index=False))
-
-            # Check data types
-            print(f"\n--- DEBUG: Data types for {join_key} ---")
-            for i, p_path in enumerate(target_parquet_files[:2], 1):
-                table_name = os.path.splitext(os.path.basename(p_path))[0]
-                type_query = f"DESCRIBE (SELECT {join_key} FROM read_parquet('{p_path}') LIMIT 1)"
-                type_result = execute_duckdb_query(type_query, config)
-                print(f"Table {i} ({table_name}): {type_result['column_type'][0]}")
-
-        print("\n" + "="*80)
-        print("       *** END DEBUG MODE ***")
-        print("="*80 + "\n")
-
     # 3. DECOMPOSITION
+    print("-> STEP 2: Decomposing Multi-Intent Query...")
     sub_queries = decompose_multi_intent_query(llm_client, user_question, config.azure_openai.llm_deployment_name)
     
     if len(sub_queries) == 1 and sub_queries[0] == user_question:
-        print("-> STEP 3: Single-Topic Flow Detected.")
+        print("-> Decomposition Success: Single-Topic Flow Detected.")
     else:
+        print(f"-> Decomposition Success: Found {len(sub_queries)} sub-queries.")
         print(f"-> STEP 3: Multi-Topic Flow Detected. Sub-queries: {sub_queries}")
         print("-> Executing sub-queries concurrently...")
-        
 
     final_combined_results: Dict[str, pd.DataFrame] = {}
     
@@ -361,9 +368,15 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
         
         future_to_query = {
             executor.submit(
-                # Pass the join_key to process_single_query
                 process_single_query, 
-                llm_client, sub_query, parquet_schema, df_sample, target_parquet_files, excel_path, join_key, config # <-- PASS CONFIG HERE
+                llm_client, 
+                sub_query, 
+                parquet_schema, 
+                df_sample, 
+                target_parquet_files, 
+                global_catalog_dict,  # FIXED: Pass dictionary
+                join_key, 
+                config
             ): sub_query for sub_query in sub_queries
         }
 
@@ -376,13 +389,11 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
                 
                 print(f"\n--- Result for Query: '{query_text}' ---")
                 print(f"  Intent: **{intent}** | Duration: {duration:.2f}s")
+                
                 if not result_df.empty and 'Error' not in result_df.columns:
                     print("\nQuery Result:")
-                    print(result_df.head().to_markdown(index=False)) 
-                    if len(result_df) > 5:
-                        print(f"... and {len(result_df) - 5} more rows.")
+                    print(result_df.to_markdown(index=False))
                 elif 'Error' in result_df.columns:
-                    # Log the Binder Error/Execution Error more clearly
                     print(f"[EXECUTION ERROR] {result_df['Error'].iloc[0]}")
                 else:
                     print("[WARNING] Query executed but returned no results.")
@@ -399,12 +410,8 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
     return final_combined_results
 
 def main():
-    # Config is already initialized globally at module level
-    # config.validate() was called during get_config()
-
     try:
         setup_duckdb_azure_connection(config) 
-        # 2. Register a cleanup function to close the connection on exit
         atexit.register(close_persistent_duckdb_connection) 
     except Exception as e:
         print(f"[FATAL] Initial DuckDB authentication failed: {e}")
@@ -415,16 +422,14 @@ def main():
 
     print("\n--- Data Pipeline Execution Started ---")
     
-    all_parquet_files = [] # This list will hold ALL final Parquet paths
+    all_parquet_files = []
 
-    # 1. PARALLEL FILE PROCESSING AND INGESTION
+    # 1. PARALLEL FILE PROCESSING
     MAX_WORKERS = 4 
     
     print(f"[INFO] Starting parallel file processing for {len(config.input_file_paths)} files with {MAX_WORKERS} threads.")
 
-
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-
         future_to_file = {
             executor.submit(
                 convert_excel_to_parquet,
@@ -447,13 +452,14 @@ def main():
         print("[CRITICAL] No data files were successfully processed. Aborting.")
         sys.exit(1)
         
-    # Step 2: Build the global catalog
-    global_catalog = build_global_catalog(all_parquet_files, config) # <-- PASS CONFIG HERE
+    # 2. Build the global catalog - NOW RETURNS BOTH STRING AND DICT
+    global_catalog_string, global_catalog_dict = build_global_catalog(all_parquet_files, config)
         
     print("\n" + "="*50)
     print("      GLOBAL DATA CATALOG LOADED")
     print("="*50)
-    print("\n### Logical Tables Available ###\n" + global_catalog)
+    print("\n### Logical Tables Available ###")
+    print(global_catalog_string)
     print("="*50)
     
     # --- STARTING EXECUTION ---
@@ -461,18 +467,15 @@ def main():
     print("### STARTING QUERY EXECUTION ###")
     print("#"*50)
     
-    # We use the path to the FIRST excel file for the excel_path argument in RAG lookup
-    first_excel_path = config.input_file_paths[0] 
-    
-    # Example 1: Multi-Intent Query (This is the failing query from the log)
+    # Example: Multi-Intent Query
     generate_and_execute_query(
         llm_client,
-        "What is Maximum Discount offered for each price change reason and what is loan amount of Harrison, Ters.",
+        "what's the credit score of Harrison, T. and what type of loan she applied for. thanks",
         all_parquet_files,
-        global_catalog,
-        first_excel_path,
+        global_catalog_string,  # For LLM display
+        global_catalog_dict,    # For programmatic access
         config,
-        enable_debug=False  # Set to True to enable detailed debug output (slower)
+        enable_debug=False
     )
     
     print("\n--- Execution Complete ---")
