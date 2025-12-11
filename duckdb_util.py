@@ -60,8 +60,9 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
             # This ensures the connection is fully established before real queries run
             try:
                 # Test the connection by listing files (lightweight operation)
-                warmup_glob = f"azure://{config.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{config.AZURE_STORAGE_CONTAINER_NAME}/*.parquet"
-                conn.execute(f"SELECT * FROM glob('{warmup_glob}') LIMIT 1").fetchall()
+                # warmup_glob = f"azure://{config.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{config.AZURE_STORAGE_CONTAINER_NAME}/*.parquet"
+                known_file = f"azure://{config.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{config.AZURE_STORAGE_CONTAINER_NAME}/parquet_files/file1_Sheet1.parquet"
+                conn.execute(f"SELECT * FROM glob('{known_file}') LIMIT 1").fetchall()
                 print("[INFO] Azure connection warmed up and ready.")
             except Exception as warmup_err:
                 # Non-fatal: connection might still work for actual queries
