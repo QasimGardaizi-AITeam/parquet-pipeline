@@ -53,9 +53,20 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
             # Escape single quotes in the connection string by doubling them
             escaped_conn_str = connection_string.replace("'", "''")
             conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
-            
+
             print("[SUCCESS] Persistent DuckDB Azure authentication configured successfully.")
-            
+
+            # CRITICAL FIX: Warm up the Azure connection with a lightweight test query
+            # This ensures the connection is fully established before real queries run
+            try:
+                # Test the connection by listing files (lightweight operation)
+                warmup_glob = f"azure://{config.AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/{config.AZURE_STORAGE_CONTAINER_NAME}/*.parquet"
+                conn.execute(f"SELECT * FROM glob('{warmup_glob}') LIMIT 1").fetchall()
+                print("[INFO] Azure connection warmed up and ready.")
+            except Exception as warmup_err:
+                # Non-fatal: connection might still work for actual queries
+                print(f"[WARNING] Connection warm-up failed (non-fatal): {warmup_err}")
+
             # Store the connection globally for reuse
             PERSISTENT_DUCKDB_CONN = conn
             return conn
