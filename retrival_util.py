@@ -5,36 +5,26 @@ from openai import AzureOpenAI
 from pymongo import MongoClient
 from typing import List, Dict
 
-# --- 1. Configuration and Initialization ---
-load_dotenv()
-try:
-    AZURE_ENDPOINT = f"https://{os.environ['OPENAI_EMBEDDING_RESOURCE']}.openai.azure.com/"
-    AZURE_API_KEY = os.environ['OPENAI_EMBEDDING_API_KEY']
-    AZURE_API_VERSION = os.environ['OPENAI_EMBEDDING_VERSION']
-    
-    EMBEDDING_DEPLOYMENT_NAME = os.environ['OPENAI_EMBEDDING_MODEL']
-    
-    MONGO_URI = os.environ['MONGO_URI']
-    DATABASE_NAME = "vector_rag_db"
-    VECTOR_INDEX_NAME = "vector_index" 
-    
-except KeyError as e:
-    print(f"FATAL ERROR (Retrieval): Missing environment variable {e}.")
-    sys.exit(1)
+# --- 1. Configuration & Client Setup ---
+
+from config import get_config, VectorDBType
+
+# Get config
+config = get_config(VectorDBType.MONGODB)
 
 try:
     openai_client = AzureOpenAI(
-        azure_endpoint=AZURE_ENDPOINT,
-        api_key=AZURE_API_KEY,
-        api_version=AZURE_API_VERSION
+        azure_endpoint=config.azure_openai.embedding_endpoint,
+        api_key=config.azure_openai.embedding_api_key,
+        api_version=config.azure_openai.embedding_api_version
     )
 except Exception as e:
     print(f"FATAL ERROR (Retrieval): Error initializing Azure OpenAI client: {e}")
     sys.exit(1)
 
 try:
-    mongo_client = MongoClient(MONGO_URI)
-    db = mongo_client[DATABASE_NAME]
+    mongo_client = MongoClient(config.vector_db.mongodb.uri)
+    db = mongo_client[config.vector_db.mongodb.database_name]
     mongo_client.admin.command('ping')
 except Exception as e:
     print(f"FATAL ERROR (Retrieval): Error connecting to MongoDB Atlas: {e}")
@@ -47,7 +37,7 @@ def get_query_embedding(query: str) -> List[float]:
     """Generates the vector embedding for the query using Azure OpenAI."""
     try:
         response = openai_client.embeddings.create(
-            model=EMBEDDING_DEPLOYMENT_NAME,
+            model=config.azure_openai.embedding_deployment_name,
             input=query,
         )
         return response.data[0].embedding
@@ -65,7 +55,7 @@ def retrieve_chunks(collection_name: str, query_vector: List[float], limit: int 
         {
             # Stage 1: Perform the vector search
             '$vectorSearch': {
-                'index': VECTOR_INDEX_NAME,
+                'index': config.vector_db.mongodb.vector_index_name,
                 'path': 'embedding',         
                 'queryVector': query_vector,
                 'numCandidates': 50,         

@@ -10,39 +10,24 @@ from typing import List, Dict
 load_dotenv()
 
 try:
-    AZURE_ENDPOINT = f"https://{os.environ['OPENAI_EMBEDDING_RESOURCE']}.openai.azure.com/"
-    AZURE_API_KEY = os.environ['OPENAI_EMBEDDING_API_KEY']
-    AZURE_API_VERSION = os.environ['OPENAI_EMBEDDING_VERSION']
+# --- 1. Configuration & Client Setup ---
 
-    EMBEDDING_DEPLOYMENT_NAME = os.environ['OPENAI_EMBEDDING_MODEL']
+from config import get_config, VectorDBType
 
-    # ChromaDB specific config
-    CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
-    CHROMA_COLLECTION_PREFIX = os.getenv("CHROMA_COLLECTION_PREFIX", "data_source")
+# Get config
+config = get_config(VectorDBType.CHROMADB)
 
-except KeyError as e:
-    print(f"FATAL ERROR (ChromaDB Retrieval): Missing environment variable {e}.")
-    sys.exit(1)
-
-try:
-    openai_client = AzureOpenAI(
-        azure_endpoint=AZURE_ENDPOINT,
-        api_key=AZURE_API_KEY,
-        api_version=AZURE_API_VERSION
-    )
-except Exception as e:
-    print(f"FATAL ERROR (ChromaDB Retrieval): Error initializing Azure OpenAI client: {e}")
     sys.exit(1)
 
 try:
     # Initialize ChromaDB client with persistence
     chroma_client = chromadb.PersistentClient(
-        path=CHROMA_PERSIST_DIRECTORY,
+        path=config.vector_db.chromadb.persist_directory,
         settings=Settings(
             anonymized_telemetry=False
         )
     )
-    print(f"[INFO] ChromaDB client initialized for retrieval. Persistence directory: {CHROMA_PERSIST_DIRECTORY}")
+    print(f"[INFO] ChromaDB client initialized for retrieval. Persistence directory: {config.vector_db.chromadb.persist_directory}")
 except Exception as e:
     print(f"FATAL ERROR (ChromaDB Retrieval): Error initializing ChromaDB client: {e}")
     sys.exit(1)
@@ -53,7 +38,7 @@ def get_query_embedding(query: str) -> List[float]:
     """Generates the vector embedding for the query using Azure OpenAI."""
     try:
         response = openai_client.embeddings.create(
-            model=EMBEDDING_DEPLOYMENT_NAME,
+            model=config.azure_openai.embedding_deployment_name,
             input=query,
         )
         return response.data[0].embedding
@@ -110,7 +95,7 @@ def get_semantic_context_for_query_chroma(query: str, file_name: str, collection
     """
 
     if collection_prefix is None:
-        collection_prefix = CHROMA_COLLECTION_PREFIX
+        collection_prefix = config.vector_db.chromadb.collection_prefix
 
     # Get base name from file (e.g., "file1" from "file1.xlsx")
     base_name = os.path.splitext(os.path.basename(file_name))[0]

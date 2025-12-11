@@ -11,32 +11,19 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import duckdb
 
-# --- 1. Environment & Client Setup ---
+# --- 1. Configuration & Client Setup ---
 
-load_dotenv()
+from config import get_config, VectorDBType
 
-# --- Configuration Mapping ---
-try:
-    AZURE_ENDPOINT = f"https://{os.environ['OPENAI_EMBEDDING_RESOURCE']}.openai.azure.com/"
-    AZURE_API_KEY = os.environ['OPENAI_EMBEDDING_API_KEY']
-    AZURE_API_VERSION = os.environ['OPENAI_EMBEDDING_VERSION']
-    AZURE_DEPLOYMENT_NAME = os.environ['OPENAI_EMBEDDING_MODEL']
-    
-    MONGO_URI = os.environ['MONGO_URI']
-    DATABASE_NAME = os.getenv("MONGO_DATABASE_NAME", "vector_rag_db")
-    VECTOR_INDEX_NAME = os.getenv("MONGO_VECTOR_INDEX_NAME", "vector_index")
-    
-    AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+# Get config
+config = get_config(VectorDBType.MONGODB)
 
-except KeyError as e:
-    print(f"FATAL ERROR (Ingestion): Missing environment variable {e}. Ingestion cannot proceed.")
-    sys.exit(1)
 
 try:
     openai_client = AzureOpenAI(
-        azure_endpoint=AZURE_ENDPOINT,
-        api_key=AZURE_API_KEY,
-        api_version=AZURE_API_VERSION
+        azure_endpoint=config.azure_openai.embedding_endpoint,
+        api_key=config.azure_openai.embedding_api_key,
+        api_version=config.azure_openai.embedding_api_version
     )
 except Exception as e:
     print(f"FATAL ERROR (Ingestion): Error initializing Azure OpenAI client: {e}")
@@ -45,14 +32,14 @@ except Exception as e:
 try:
     # CRITICAL FIX: Increase timeouts and add retry logic
     mongo_client = MongoClient(
-        MONGO_URI, 
+        config.vector_db.mongodb.uri, 
         serverSelectionTimeoutMS=60000,
         socketTimeoutMS=120000,  # NEW: Socket timeout (2 minutes)
         connectTimeoutMS=30000,   # NEW: Connection timeout
         retryWrites=True,         # NEW: Enable retry writes
         maxPoolSize=10            # NEW: Connection pool size
     )
-    db = mongo_client[DATABASE_NAME]
+    db = mongo_client[config.vector_db.mongodb.database_name]
     mongo_client.admin.command('ping')
     print("[INFO] MongoDB connection established successfully.")
 except Exception as e:
@@ -76,8 +63,8 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
             conn.execute("INSTALL azure;")
             conn.execute("LOAD azure;")
             
-            if AZURE_STORAGE_CONNECTION_STRING:
-                escaped_conn_str = AZURE_STORAGE_CONNECTION_STRING.replace("'", "''")
+            if config.azure_storage.connection_string:
+                escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
                 conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
             
             df = conn.execute(f"SELECT * FROM read_parquet('{file_path}')").fetchdf()
@@ -239,7 +226,7 @@ def get_embedding_for_chunk(chunk_texts: List[str]) -> List[List[float]]:
     """Worker function to get embeddings for a batch of chunk texts."""
     try:
         response = openai_client.embeddings.create(
-            model=AZURE_DEPLOYMENT_NAME,
+            model=config.azure_openai.embedding_deployment_name,
             input=chunk_texts,
         )
         return [data.embedding for data in response.data]
@@ -323,7 +310,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
     print(f"Generated {len(chunks)} chunks.")
     chunk_texts = [c["text"] for c in chunks]
 
-    print(f"Starting parallel vector embedding using Azure Deployment: {AZURE_DEPLOYMENT_NAME}...")
+    print(f"Starting parallel vector embedding using Azure Deployment: {config.azure_openai.embedding_deployment_name}...")
     
     BATCH_SIZE = 200 
     MAX_THREADS = 8
@@ -397,7 +384,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
                     db, 
                     COLLECTION_NAME, 
                     first_chunk_id, 
-                    index_name=VECTOR_INDEX_NAME, 
+                    index_name=config.vector_db.mongodb.vector_index_name, 
                     timeout=SYNC_TIMEOUT
                 ):
                     print("[WARNING] Atlas Search sync timed out, but continuing...")
@@ -405,7 +392,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
                 print(f"[INFO] Skipping sync check for large dataset ({len(mongo_documents)} docs). Index will sync in background.")
             
             # 8. Ensure index exists
-            index_success = ensure_vector_search_index(db, COLLECTION_NAME, embedding_dim=embedding_dim, index_name=VECTOR_INDEX_NAME)
+            index_success = ensure_vector_search_index(db, COLLECTION_NAME, embedding_dim=embedding_dim, index_name=config.vector_db.mongodb.vector_index_name)
             if not index_success:
                 return "Error: Data inserted, but Atlas Vector Index creation failed."
             
