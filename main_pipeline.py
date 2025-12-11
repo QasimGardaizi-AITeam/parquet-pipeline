@@ -470,7 +470,7 @@ def main():
     # Example: Multi-Intent Query
     generate_and_execute_query(
         llm_client,
-        "what's the credit score of Harrison, T. and what type of loan she applied for. thanks",
+        "what's the max discount on each price change reason",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access

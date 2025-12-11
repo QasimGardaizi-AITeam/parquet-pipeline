@@ -350,7 +350,7 @@ def get_semantic_context_and_files(
         relevant_collections_info = get_relevant_collections_with_scores(
             query=query,
             collection_prefix=collection_prefix,
-            top_k=3,
+            top_k=7,
             score_threshold=score_threshold
         )
         
