@@ -47,8 +47,7 @@ try:
     chroma_client = chromadb.PersistentClient(
         path=CHROMA_PERSIST_DIRECTORY,
         settings=Settings(
-            anonymized_telemetry=False,
-            allow_reset=True
+            anonymized_telemetry=False
         )
     )
     print(f"[INFO] ChromaDB client initialized. Persistence directory: {CHROMA_PERSIST_DIRECTORY}")
