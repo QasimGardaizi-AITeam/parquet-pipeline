@@ -101,36 +101,68 @@ def retrieve_chunks_from_chroma(collection_name: str, query_vector: List[float],
 
 def get_semantic_context_for_query_chroma(query: str, file_name: str, collection_prefix: str = None, limit: int = 7) -> str:
     """
-    Executes the full vector retrieval process using ChromaDB and returns the concatenated text context,
-    dynamically determining the collection name from the file name.
+    Executes the full vector retrieval process using ChromaDB and returns the concatenated text context.
+    Searches across all collections that match the base file name pattern.
+    For example, if file_name is 'file1.xlsx', it will search in all collections like:
+    - data_source_file1_Sheet1
+    - data_source_file1_Sheet2
+    etc.
     """
 
     if collection_prefix is None:
         collection_prefix = CHROMA_COLLECTION_PREFIX
 
+    # Get base name from file (e.g., "file1" from "file1.xlsx")
     base_name = os.path.splitext(os.path.basename(file_name))[0]
-    collection_name = f"{collection_prefix}_{base_name}"
-
-    # Ensure collection name meets ChromaDB requirements
-    collection_name = collection_name.replace('-', '_')[:63]
+    base_pattern = f"{collection_prefix}_{base_name}"
 
     query_vector = get_query_embedding(query)
     if not query_vector:
         return ""
 
-    retrieved_docs = retrieve_chunks_from_chroma(collection_name, query_vector, limit=limit)
+    # Get all available collections
+    try:
+        all_collections = chroma_client.list_collections()
+        collection_names = [col.name for col in all_collections]
 
-    if not retrieved_docs:
-        print(f"[WARNING] No documents retrieved from ChromaDB collection '{collection_name}'")
+        # Find collections that match the base pattern
+        matching_collections = [
+            name for name in collection_names
+            if name.startswith(base_pattern)
+        ]
+
+        if not matching_collections:
+            print(f"[WARNING] No ChromaDB collections found matching pattern '{base_pattern}*'")
+            print(f"[INFO] Available collections: {collection_names}")
+            return ""
+
+        print(f"[INFO] Searching across {len(matching_collections)} collection(s): {matching_collections}")
+
+        # Collect results from all matching collections
+        all_retrieved_docs = []
+        for collection_name in matching_collections:
+            docs = retrieve_chunks_from_chroma(collection_name, query_vector, limit=limit)
+            all_retrieved_docs.extend(docs)
+
+        if not all_retrieved_docs:
+            print(f"[WARNING] No documents retrieved from any matching collections")
+            return ""
+
+        # Sort by score (descending) and take top N
+        all_retrieved_docs.sort(key=lambda x: x['score'], reverse=True)
+        top_docs = all_retrieved_docs[:limit]
+
+        # Process Retrieved Documents and return concatenated text
+        context_list = [doc['text'] for doc in top_docs]
+        full_context = "\n\n".join(context_list)
+
+        print(f'-> SUCCESS: Semantic context retrieved from ChromaDB (Top score: {top_docs[0]["score"]:.4f})')
+
+        return full_context
+
+    except Exception as e:
+        print(f"[ERROR] Failed to search ChromaDB collections: {e}")
         return ""
-
-    # 4. Process Retrieved Documents and return concatenated text
-    context_list = [doc['text'] for doc in retrieved_docs]
-    full_context = "\n\n".join(context_list)
-
-    print(f'-> SUCCESS: Semantic context retrieved from ChromaDB (Score: {retrieved_docs[0]["score"]:.4f}). Context preview:')
-
-    return full_context
 
 
 def list_chroma_collections() -> List[str]:
