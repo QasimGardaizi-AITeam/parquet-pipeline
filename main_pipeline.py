@@ -220,7 +220,8 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         {schema}
         --- END OF SCHEMA ---
 
-        -- Sample Data (Top 100 rows for general structure) --
+        -- Sample Data (Top 50 rows from each table) --
+        -- Note: In JOIN mode, __TABLE__ column shows which table each row is from (e.g., "T1:file1_Sheet1") --
         {df_sample.to_markdown(index=False)}
         -- End of Sample Data --
 
