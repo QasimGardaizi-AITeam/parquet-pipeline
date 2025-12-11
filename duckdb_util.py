@@ -85,8 +85,9 @@ atexit.register(close_persistent_duckdb_connection)
 
 def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = False, all_parquet_glob_pattern: str = None, config: Any = None) -> Tuple[str, pd.DataFrame]:
     """
-    Dynamically gets the combined schema and top 5 rows from a list of Parquet URIs/Paths
+    Dynamically gets the combined schema and top 50 rows from each Parquet file
     using the persistent DuckDB connection.
+    In JOIN mode, samples from ALL files and combines them with a __TABLE__ identifier.
     """
     try:
         if not parquet_paths:
@@ -135,10 +136,23 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                 all_schema_lines.extend(col_lines)
 
             schema_string = "\n".join(all_schema_lines)
-            
+
+            # Sample from ALL files in JOIN mode to give LLM complete context
             if parquet_paths:
-                # Use the first path for a sample if in JOIN mode
-                df_sample = conn.execute(f"SELECT * FROM read_parquet('{parquet_paths[0]}') LIMIT 5").fetchdf()
+                sample_dfs = []
+                for i, p_path in enumerate(parquet_paths):
+                    logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0]
+                    alias = f"T{i+1}"
+
+                    # Fetch sample from each file
+                    sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 50").fetchdf()
+
+                    # Add table identifier as a column to help LLM understand which table this is from
+                    sample.insert(0, '__TABLE__', f"{alias}:{logical_name}")
+                    sample_dfs.append(sample)
+
+                # Combine all samples vertically
+                df_sample = pd.concat(sample_dfs, ignore_index=True)
                  
         # NOTE: Connection remains open
         return schema_string, df_sample
