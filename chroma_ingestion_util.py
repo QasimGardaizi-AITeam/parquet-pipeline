@@ -11,46 +11,33 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import duckdb
 
-# --- 1. Environment & Client Setup ---
+# --- 1. Configuration & Client Setup ---
 
-load_dotenv()
+from config import get_config, VectorDBType
 
-# --- Configuration Mapping ---
-try:
-    AZURE_ENDPOINT = f"https://{os.environ['OPENAI_EMBEDDING_RESOURCE']}.openai.azure.com/"
-    AZURE_API_KEY = os.environ['OPENAI_EMBEDDING_API_KEY']
-    AZURE_API_VERSION = os.environ['OPENAI_EMBEDDING_VERSION']
-    AZURE_DEPLOYMENT_NAME = os.environ['OPENAI_EMBEDDING_MODEL']
+# Get config
+config = get_config(VectorDBType.CHROMADB)
 
-    AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-
-    # ChromaDB specific config
-    CHROMA_PERSIST_DIRECTORY = os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
-    CHROMA_COLLECTION_PREFIX = os.getenv("CHROMA_COLLECTION_PREFIX", "data_source")
-
-except KeyError as e:
-    print(f"FATAL ERROR (ChromaDB Ingestion): Missing environment variable {e}. Ingestion cannot proceed.")
-    sys.exit(1)
-
+# Initialize Azure OpenAI client
 try:
     openai_client = AzureOpenAI(
-        azure_endpoint=AZURE_ENDPOINT,
-        api_key=AZURE_API_KEY,
-        api_version=AZURE_API_VERSION
+        azure_endpoint=config.azure_openai.embedding_endpoint,
+        api_key=config.azure_openai.embedding_api_key,
+        api_version=config.azure_openai.embedding_api_version
     )
 except Exception as e:
     print(f"FATAL ERROR (ChromaDB Ingestion): Error initializing Azure OpenAI client: {e}")
     sys.exit(1)
 
+# Initialize ChromaDB client
 try:
-    # Initialize ChromaDB client with persistence
     chroma_client = chromadb.PersistentClient(
-        path=CHROMA_PERSIST_DIRECTORY,
+        path=config.vector_db.chromadb.persist_directory,
         settings=Settings(
-            anonymized_telemetry=False
+            anonymized_telemetry=config.vector_db.chromadb.anonymized_telemetry
         )
     )
-    print(f"[INFO] ChromaDB client initialized. Persistence directory: {CHROMA_PERSIST_DIRECTORY}")
+    print(f"[INFO] ChromaDB client initialized. Persistence directory: {config.vector_db.chromadb.persist_directory}")
 except Exception as e:
     print(f"FATAL ERROR (ChromaDB Ingestion): Error initializing ChromaDB client: {e}")
     sys.exit(1)
@@ -72,8 +59,8 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
             conn.execute("INSTALL azure;")
             conn.execute("LOAD azure;")
 
-            if AZURE_STORAGE_CONNECTION_STRING:
-                escaped_conn_str = AZURE_STORAGE_CONNECTION_STRING.replace("'", "''")
+            if config.azure_storage.connection_string:
+                escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
                 conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
 
             df = conn.execute(f"SELECT * FROM read_parquet('{file_path}')").fetchdf()
@@ -132,7 +119,7 @@ def get_embedding_for_chunk(chunk_texts: List[str]) -> List[List[float]]:
     """Worker function to get embeddings for a batch of chunk texts."""
     try:
         response = openai_client.embeddings.create(
-            model=AZURE_DEPLOYMENT_NAME,
+            model=config.azure_openai.embedding_deployment_name,
             input=chunk_texts,
         )
         return [data.embedding for data in response.data]
@@ -151,7 +138,7 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
     """
 
     if collection_prefix is None:
-        collection_prefix = CHROMA_COLLECTION_PREFIX
+        collection_prefix = config.vector_db.chromadb.collection_prefix
 
     # 1. Determine Dynamic Collection Name
     base_name = os.path.splitext(os.path.basename(file_path.split('/')[-1]))[0]
@@ -184,7 +171,7 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
     print(f"Generated {len(chunks)} chunks.")
     chunk_texts = [c["text"] for c in chunks]
 
-    print(f"Starting parallel vector embedding using Azure Deployment: {AZURE_DEPLOYMENT_NAME}...")
+    print(f"Starting parallel vector embedding using Azure Deployment: {config.azure_openai.embedding_deployment_name}...")
 
     BATCH_SIZE = 200
     MAX_THREADS = 8

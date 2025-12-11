@@ -56,52 +56,22 @@ except ImportError:
         print("[WARNING] Using fallback semantic context.")
         return ""
 
+# Import universal configuration
+from config import get_config, Config, VectorDBType
 
-load_dotenv()
-
-class Config:
-    """Centralized configuration constants."""
-    LLM_DEPLOYMENT_NAME = os.getenv("azureOpenAIApiDeploymentName") 
-    LLM_API_KEY = os.getenv("azureOpenAIApiKey")
-    LLM_ENDPOINT = os.getenv("azureOpenAIEndpoint")
-    LLM_API_VERSION = os.getenv("azureOpenAIApiVersion", "2024-08-01-preview")
-    LLM_MODEL_NAME = "gpt-4o"
-    
-    # Blob Storage
-    AZURE_STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
-    AZURE_STORAGE_CONTAINER_NAME = os.getenv("AZURE_STORAGE_CONTAINER_NAME")
-    AZURE_STORAGE_ACCOUNT_KEY = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
-    AZURE_STORAGE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
-
-    # --- UPDATED FILE PATHS FOR MULTI-FILE/TAB SUPPORT ---
-    INPUT_FILE_PATHS: List[str] = [
-        '../sheets/file1.xlsx',
-        '../sheets/file2.xlsx',
-        '../sheets/loan.xlsx'
-    ]
-    PARQUET_OUTPUT_DIR = 'parquet_files/'
-    ALL_PARQUET_GLOB_PATTERN = (
-        f"azure://{AZURE_STORAGE_ACCOUNT_NAME}.blob.core.windows.net/"
-        f"{AZURE_STORAGE_CONTAINER_NAME}/{PARQUET_OUTPUT_DIR}*.parquet"
-    )
-    
-    @staticmethod
-    def validate_env():
-        """Checks for essential Azure OpenAI environment variables."""
-        if not all([Config.LLM_API_KEY, Config.LLM_ENDPOINT, Config.LLM_DEPLOYMENT_NAME]):
-            print("\n[FATAL] Missing one or more critical Azure OpenAI environment variables.")
-            sys.exit(1)
+# Initialize configuration
+config = get_config(VectorDBType.CHROMADB)  # Change to MONGODB to switch
 
 # 1. CLIENT SETUP AND UTILITIES
 def setup_llm_client():
     """Configures the native AzureOpenAI client."""
     try:
         llm_client = AzureOpenAI(
-            api_key=Config.LLM_API_KEY,
-            azure_endpoint=Config.LLM_ENDPOINT,
-            api_version=Config.LLM_API_VERSION
+            api_key=config.azure_openai.llm_api_key,
+            azure_endpoint=config.azure_openai.llm_endpoint,
+            api_version=config.azure_openai.llm_api_version
         )
-        print(f"[INFO] AzureOpenAI Client configured successfully for deployment: {Config.LLM_DEPLOYMENT_NAME}")
+        print(f"[INFO] AzureOpenAI Client configured successfully for deployment: {config.azure_openai.llm_deployment_name}")
         return llm_client
     except Exception as e:
         print(f"[ERROR] Configuring AzureOpenAI Client: {e}")
@@ -134,7 +104,7 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
     
     try:
         response = llm_client.chat.completions.create(
-            model=Config.LLM_DEPLOYMENT_NAME,
+            model=config.azure_openai.llm_deployment_name,
             messages=[
                 {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
                 {"role": "user", "content": f"User Query: {user_question}"}
@@ -182,7 +152,7 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
     # 3. Dynamic Table Source Definition (FIXED LOGIC)
     
     # Check if we should use the multi-file JOIN definition
-    if len(parquet_files) > 1 and join_key and not (parquet_files == [Config.ALL_PARQUET_GLOB_PATTERN]):
+    if len(parquet_files) > 1 and join_key and not (parquet_files == [config.azure_storage.glob_pattern]):
         # Scenario: Multiple tables need a JOIN
         table_aliases = []
         parquet_reads = []
@@ -202,9 +172,9 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
         # Scenario: Single file, or multiple files using UNION_BY_NAME
         paths_str = ', '.join(f"'{p}'" for p in parquet_files)
         
-        if parquet_files == [config.ALL_PARQUET_GLOB_PATTERN]:
+        if parquet_files == [config.azure_storage.glob_pattern]:
              # General query across all files
-             TABLE_DEFINITION = f"The data source is ALWAYS loaded as a single unified table using: 'read_parquet('{config.ALL_PARQUET_GLOB_PATTERN}', union_by_name=true)'"
+             TABLE_DEFINITION = f"The data source is ALWAYS loaded as a single unified table using: 'read_parquet('{config.azure_storage.glob_pattern}', union_by_name=true)'"
         else:
             # Single file or explicit multi-file without join key
             TABLE_DEFINITION = f"The source data is the set of files: {paths_str}. They are loaded as one unified table using: 'read_parquet([{paths_str}], union_by_name=true)'"
@@ -238,7 +208,7 @@ def process_single_query(llm_client: AzureOpenAI, user_question: str, schema: st
 
     # 5. Call LLM for SQL
     response = llm_client.chat.completions.create(
-        model=config.LLM_DEPLOYMENT_NAME,
+        model=config.azure_openai.llm_deployment_name,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_question}
@@ -275,7 +245,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
     overall_start_time = time.time()
 
     # 1. FILE/TABLE IDENTIFICATION (New LLM Step)
-    required_tables_names, join_key = identify_required_tables(llm_client, user_question, config.LLM_DEPLOYMENT_NAME, global_catalog)
+    required_tables_names, join_key = identify_required_tables(llm_client, user_question, config.azure_openai.llm_deployment_name, global_catalog)
 
     # Map the logical names back to the actual file paths
     # Filter the master list of all_parquet_files to find the ones matching the logical names
@@ -285,7 +255,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
 
     if required_tables_names == ["*"]:
         # Querying all Parquet files using the glob pattern
-        target_parquet_files = [config.ALL_PARQUET_GLOB_PATTERN]
+        target_parquet_files = [config.azure_storage.glob_pattern]
         use_union_by_name = True
         print(f"-> STEP 1: Identified ALL available files/tables via glob: {target_parquet_files[0]} (Mode: UNION_BY_NAME)")
     else:
@@ -311,7 +281,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
     parquet_schema, df_sample = get_parquet_context(
         target_parquet_files,
         use_union_by_name=use_union_by_name,
-        all_parquet_glob_pattern=config.ALL_PARQUET_GLOB_PATTERN, # Passed here
+        all_parquet_glob_pattern=config.azure_storage.glob_pattern, # Passed here
         config=config # <-- PASS CONFIG HERE
     )
 
@@ -375,7 +345,7 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
         print("="*80 + "\n")
 
     # 3. DECOMPOSITION
-    sub_queries = decompose_multi_intent_query(llm_client, user_question, config.LLM_DEPLOYMENT_NAME)
+    sub_queries = decompose_multi_intent_query(llm_client, user_question, config.azure_openai.llm_deployment_name)
     
     if len(sub_queries) == 1 and sub_queries[0] == user_question:
         print("-> STEP 3: Single-Topic Flow Detected.")
@@ -429,10 +399,9 @@ def generate_and_execute_query(llm_client: AzureOpenAI, user_question: str, all_
     return final_combined_results
 
 def main():
-    
-    Config.validate_env()
-    config = Config() # Instantiate the config object here
-    
+    # Config is already initialized globally at module level
+    # config.validate() was called during get_config()
+
     try:
         setup_duckdb_azure_connection(config) 
         # 2. Register a cleanup function to close the connection on exit
@@ -451,18 +420,18 @@ def main():
     # 1. PARALLEL FILE PROCESSING AND INGESTION
     MAX_WORKERS = 4 
     
-    print(f"[INFO] Starting parallel file processing for {len(config.INPUT_FILE_PATHS)} files with {MAX_WORKERS} threads.")
-    
-    
+    print(f"[INFO] Starting parallel file processing for {len(config.input_file_paths)} files with {MAX_WORKERS} threads.")
+
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        
+
         future_to_file = {
             executor.submit(
-                convert_excel_to_parquet, 
-                excel_input_path, 
-                config.PARQUET_OUTPUT_DIR,
+                convert_excel_to_parquet,
+                excel_input_path,
+                config.azure_storage.parquet_output_dir,
                 config
-            ): excel_input_path for excel_input_path in config.INPUT_FILE_PATHS
+            ): excel_input_path for excel_input_path in config.input_file_paths
             if os.path.exists(excel_input_path)
         }
         
@@ -493,7 +462,7 @@ def main():
     print("#"*50)
     
     # We use the path to the FIRST excel file for the excel_path argument in RAG lookup
-    first_excel_path = config.INPUT_FILE_PATHS[0] 
+    first_excel_path = config.input_file_paths[0] 
     
     # Example 1: Multi-Intent Query (This is the failing query from the log)
     generate_and_execute_query(
