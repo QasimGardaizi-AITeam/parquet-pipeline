@@ -12,6 +12,9 @@ openai>=1.1.1 # Azure OpenAI Client (for GPT-4o and embeddings)
 # --- Vector Database (MongoDB Atlas) ---
 pymongo>=4.6.1 # Python driver for MongoDB Atlas
 
+# --- Vector Database (ChromaDB - Alternative) ---
+chromadb>=0.4.22 # ChromaDB for local vector storage and retrieval
+
 # --- Utilities and Environment ---
 python-dotenv>=1.0.1 # For loading .env file configuration
 typing # Standard library type hints (optional, but good practice)
