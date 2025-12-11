@@ -37,16 +37,14 @@ def identify_required_tables(llm_client: AzureOpenAI, user_question: str, deploy
     """Uses LLM to map user query to internal logical tables."""
     
     SYSTEM_PROMPT = f"""
-        You are a data source selection agent. Your task is to identify the logical tables needed to answer the user's question based on the Data Catalog.
-
+        You are a data source selection agent. Your task is to identify ALL logical tables needed to answer the user's question based on the Data Catalog.
         --- DATA CATALOG ---
         {catalog_schema}
         --- END CATALOG ---
-
-        CRITICAL RULE: Call the 'identify_data_sources' tool exactly once. 
-        1. If the query applies generally across all known data, use '*' as the sole entry in 'tables_required'.
-        2. If the query requires combining data from multiple tables, you MUST list all required tables and correctly specify the 'join_key' (the common column) that connects them. The presence of a join_key will signal the system to perform a JOIN operation using aliases (T1, T2, etc.) rather than a UNION.
-        """
+        CRITICAL RULES:
+        1. **Analyze ALL filtering criteria** in the user's question (dates, product types, names, categories, etc.)
+        2. **Map each filter to its column**: Identify which table contains each column needed for filtering
+        3. **Include ALL tables**: If filters require columns from multiple tables, you MUST list ALL of them"""
     
     try:
         response = llm_client.chat.completions.create(
