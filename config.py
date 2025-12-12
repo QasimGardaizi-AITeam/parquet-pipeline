@@ -23,17 +23,17 @@ class VectorDBType(Enum):
 @dataclass
 class AzureOpenAIConfig:
     """Azure OpenAI configuration for LLM and embeddings"""
-    # LLM (GPT-4o) Configuration
+    # Required fields (no defaults) must come first
     llm_endpoint: str
     llm_api_key: str
     llm_deployment_name: str
-    llm_api_version: str = "2024-08-01-preview"
-    llm_model_name: str = "gpt-4o"
-
-    # Embedding Configuration
     embedding_endpoint: str
     embedding_api_key: str
     embedding_deployment_name: str
+
+    # Optional fields (with defaults) must come after
+    llm_api_version: str = "2024-08-01-preview"
+    llm_model_name: str = "gpt-4o"
     embedding_api_version: str = "2024-02-01"
 
     @classmethod
