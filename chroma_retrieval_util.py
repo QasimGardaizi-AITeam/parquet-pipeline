@@ -146,7 +146,7 @@ def retrieve_chunks_from_chroma(collection_name: str, query_vector: List[float],
 def get_relevant_collections_with_scores(
     query: str,
     collection_prefix: str = None,
-    top_k: int = 3,
+    top_k: int = 10,
     score_threshold: float = 0.5
 ) -> List[Dict[str, any]]:
     """
@@ -227,7 +227,7 @@ def get_semantic_context_for_query_chroma(
     query: str, 
     file_name: str, 
     collection_prefix: str = None, 
-    limit: int = 7
+    limit: int = 10
 ) -> str:
     """
     LEGACY FUNCTION: Executes vector retrieval using a specific file name.
@@ -292,7 +292,7 @@ def get_semantic_context_and_files(
     file_name: str = None,
     catalog: Dict = None,
     collection_prefix: str = None,
-    limit: int = 7,
+    limit: int = 10,
     score_threshold: float = 0.5
 ) -> Tuple[str, List[str]]:
     """
@@ -348,16 +348,33 @@ def get_semantic_context_and_files(
         relevant_collections_info = get_relevant_collections_with_scores(
             query=query,
             collection_prefix=collection_prefix,
-            top_k=7,
+            top_k=10,
             score_threshold=score_threshold
         )
         
         if not relevant_collections_info:
-            print(f"[ERROR] No relevant collections found for query")
-            return "", []
-        
-        matching_collections = [item['collection_name'] for item in relevant_collections_info]
-        print(f"[INFO] Smart search identified {len(matching_collections)} relevant collection(s)")
+            # Fallback: search across all collections with the prefix
+            try:
+                all_collections = chroma_client.list_collections()
+                matching_collections = [
+                    col.name for col in all_collections if col.name.startswith(collection_prefix)
+                ]
+                print(f"[WARNING] No high-scoring collections; falling back to all collections with prefix '{collection_prefix}'")
+            except Exception as e:
+                print(f"[ERROR] No relevant collections found and listing failed: {e}")
+                # Final fallback: legacy retrieval if a file hint exists
+                if file_name:
+                    legacy_ctx = get_semantic_context_for_query_chroma(
+                        query=query,
+                        file_name=file_name,
+                        collection_prefix=collection_prefix,
+                        limit=limit
+                    )
+                    return legacy_ctx, []
+                return "", []
+        else:
+            matching_collections = [item['collection_name'] for item in relevant_collections_info]
+            print(f"[INFO] Smart search identified {len(matching_collections)} relevant collection(s)")
     
     # Retrieve from all matching collections
     all_retrieved_docs = []
@@ -368,6 +385,15 @@ def get_semantic_context_and_files(
     
     if not all_retrieved_docs:
         print(f"[WARNING] No documents retrieved from any collection")
+        # Fallback: legacy retrieval when a file hint is present
+        if file_name:
+            legacy_ctx = get_semantic_context_for_query_chroma(
+                query=query,
+                file_name=file_name,
+                collection_prefix=collection_prefix,
+                limit=limit
+            )
+            return legacy_ctx, []
         return "", []
     
     # Sort by score and take top N
@@ -402,7 +428,3 @@ def get_semantic_context_and_files(
     
     return full_context, parquet_paths
 
-
-# ============================================================================
-# UTILITY FUNCTIONS
-# ============================================================================

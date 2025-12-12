@@ -61,6 +61,26 @@ from config import get_config, Config, VectorDBType
 # Initialize configuration
 config = get_config(VectorDBType.CHROMADB)
 
+def suggest_closest_applicant_names(name_query: str, parquet_files: List[str], config: Config, limit: int = 5) -> List[str]:
+    """
+    Fuzzy helper: fetch closest applicant_name values using DuckDB Levenshtein distance.
+    Provides canonical spellings to guide SQL when user input is misspelled.
+    """
+    try:
+        conn = setup_duckdb_azure_connection(config)
+        paths_str = ', '.join(f"'{p}'" for p in parquet_files)
+        query = f"""
+            SELECT applicant_name
+            FROM read_parquet([{paths_str}], union_by_name=true)
+            WHERE applicant_name IS NOT NULL
+            ORDER BY levenshtein(lower(applicant_name), lower(?))
+            LIMIT {limit}
+        """
+        df = conn.execute(query, [name_query]).fetchdf()
+        return df["applicant_name"].tolist()
+    except Exception:
+        return []
+
 # 1. CLIENT SETUP AND UTILITIES
 def setup_llm_client():
     """Configures the native AzureOpenAI client."""
@@ -145,6 +165,7 @@ def process_single_query(
     AUGMENTATION_HINT = ""
     semantic_lookup_duration = 0
     rag_identified_parquet_files = []
+    fuzzy_name_candidates: List[str] = []
 
     # 2. RAG Lookup (if needed) - UPDATED WITH SMART RETRIEVAL
     if intent == 'SEMANTIC_SEARCH':
@@ -158,7 +179,7 @@ def process_single_query(
                     query=user_question,
                     file_name=None,  # Let it auto-detect
                     catalog=global_catalog_dict,  # FIXED: Pass the dictionary, not string
-                    limit=7,
+                    limit=10,
                     score_threshold=0.5
                 )
                 
@@ -203,6 +224,16 @@ def process_single_query(
                 )
         
         semantic_lookup_duration = time.time() - lookup_start
+
+        # Fuzzy fallback: surface closest applicant_name values when the schema contains that column
+        if "applicant_name" in schema.lower():
+            fuzzy_name_candidates = suggest_closest_applicant_names(user_question, parquet_files, config, limit=5)
+            if fuzzy_name_candidates:
+                AUGMENTATION_HINT += (
+                    "\n*** FUZZY NAME SUGGESTIONS (Levenshtein) ***\n"
+                    f"Candidate applicant_name values: {fuzzy_name_candidates}\n"
+                    "*** END SUGGESTIONS ***\n"
+                )
             
     # 3. Dynamic Table Source Definition
     if len(parquet_files) > 1 and join_key and not (parquet_files == [config.azure_storage.glob_pattern]):

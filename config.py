@@ -200,8 +200,8 @@ class AppConfig:
     # Default fields
     # Application settings
     input_file_paths: List[str] = field(default_factory=lambda: [
-        '../sheets/file1.xlsx',
-        '../sheets/file2.xlsx',
+        # '../sheets/file1.xlsx',
+        # '../sheets/file2.xlsx',
         '../sheets/loan.xlsx'
     ])
 
