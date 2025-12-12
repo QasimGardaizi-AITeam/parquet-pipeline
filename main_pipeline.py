@@ -304,11 +304,12 @@ def process_single_query(
         
         **CRITICAL RULES FOR SQL GENERATION:**
         1. **STRICTLY USE ONLY THE COLUMN NAMES** found in the "DYNAMIC DATABASE SCHEMA".
-           **CRITICAL IDENTIFIER RULE:** If a column name contains **spaces, periods, or other special characters** (e.g., "Storage temperature", "Final Weight (g)"), you **MUST** enclose the name in **double quotes** (e.g., `"Column Name"`) in all clauses (SELECT, WHERE, GROUP BY, ORDER BY). For example, use `"Storage temperature"`, NOT `Storage_temperature`.
+           **CRITICAL IDENTIFIER RULE:** If a column name contains **spaces, periods, or other special characters** (e.g., "Storage temperature", "Final Weight (g)"), you **MUST** enclose the name in **double quotes** (e.g., `"Column Name"`) in all clauses (SELECT, WHERE, GROUP BY, ORDER BY). For example, use `"First Name"`, NOT `First_Name`.
         2. **STRICTLY FOLLOW THE TABLE DEFINITION** in your FROM/JOIN clauses.
         3. **SEMANTIC FILTERING (RAG):** If the **CONTEXTUAL SAMPLE DATA HINT** is present, you **MUST** use the exact, canonical values from the hint to form a precise `WHERE...IN (...)` clause. 
         4. **UNDERSTAND FORMATS:** Handle various date and text formats appropriately.
-        5. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query.
+        5. **DATE FORMAT:** If the user query mentions a date check, then use all different date formats with OR (e.g., User wants data of 12 Dec 24, Query would include "date = '2025-12-24' or date = '24-12-2025' or anyother date format) 
+        6. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query.
         """
     del df_sample
   
