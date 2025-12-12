@@ -296,20 +296,22 @@ def process_single_query(
         {schema}
         --- END OF SCHEMA ---
 
-        -- Sample Data (Top 50 rows from each table) --
+        -- Sample Data (Top 30 rows from each table) --
         {df_sample.to_markdown(index=False)}
         -- End of Sample Data --
 
-        {AUGMENTATION_HINT} 
+        {AUGMENTATION_HINT}
         
         **CRITICAL RULES FOR SQL GENERATION:**
         1. **STRICTLY USE ONLY THE COLUMN NAMES** found in the "DYNAMIC DATABASE SCHEMA".
+           **CRITICAL IDENTIFIER RULE:** If a column name contains **spaces, periods, or other special characters** (e.g., "Storage temperature", "Final Weight (g)"), you **MUST** enclose the name in **double quotes** (e.g., `"Column Name"`) in all clauses (SELECT, WHERE, GROUP BY, ORDER BY). For example, use `"Storage temperature"`, NOT `Storage_temperature`.
         2. **STRICTLY FOLLOW THE TABLE DEFINITION** in your FROM/JOIN clauses.
         3. **SEMANTIC FILTERING (RAG):** If the **CONTEXTUAL SAMPLE DATA HINT** is present, you **MUST** use the exact, canonical values from the hint to form a precise `WHERE...IN (...)` clause. 
         4. **UNDERSTAND FORMATS:** Handle various date and text formats appropriately.
         5. **OUTPUT REQUIREMENT**: Return ONLY the raw SQL query.
         """
-
+    del df_sample
+  
     # 5. Call LLM for SQL
     try:
         response = llm_client.chat.completions.create(
@@ -390,7 +392,7 @@ def generate_and_execute_query(
         mode = "JOIN" if len(target_parquet_files) > 1 and join_key else "UNION_BY_NAME (Fallback)"
         use_union_by_name = True if mode != "JOIN" else False
         
-        print(f"-> STEP 1: Identified specific logical tables: {required_tables_names} -> {target_parquet_files} (Join Key: {join_key if join_key else 'N/A'} | Mode: {mode})")
+        print(f"-> STEP 2: Identified specific logical tables: {required_tables_names} -> {target_parquet_files} (Join Key: {join_key if join_key else 'N/A'} | Mode: {mode})")
 
     if not target_parquet_files:
         print("[CRITICAL] File identification resulted in no usable paths. Aborting.")
@@ -405,14 +407,14 @@ def generate_and_execute_query(
     )
 
     # 3. DECOMPOSITION
-    print("-> STEP 2: Decomposing Multi-Intent Query...")
+    print("-> STEP 3: Decomposing Multi-Intent Query...")
     sub_queries = decompose_multi_intent_query(llm_client, user_question, config.azure_openai.llm_deployment_name)
     
     if len(sub_queries) == 1 and sub_queries[0] == user_question:
         print("-> Decomposition Success: Single-Topic Flow Detected.")
     else:
         print(f"-> Decomposition Success: Found {len(sub_queries)} sub-queries.")
-        print(f"-> STEP 3: Multi-Topic Flow Detected. Sub-queries: {sub_queries}")
+        print(f"-> STEP 4: Multi-Topic Flow Detected. Sub-queries: {sub_queries}")
         print("-> Executing sub-queries concurrently...")
 
     final_combined_results: Dict[str, pd.DataFrame] = {}
@@ -524,9 +526,9 @@ def main():
     # Example: Multi-Intent Query
     generate_and_execute_query(
         llm_client,
-        # "What is the average Final Weight (g) for all runs conducted at a Storage temperature of $40^\circ C$ compared to those at $25^\circ C$",
+        "What is the average Final Weight (g) for all runs conducted at a Storage temperature of $40^\circ C$ compared to those at $25^\circ C$ and List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
         # "What is the maximum Span value recorded under the $40^\circ C$ / 75%RH condition, and which SprayTec Device ID produced this result?",
-        "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
+        # "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access
