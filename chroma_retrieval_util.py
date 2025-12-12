@@ -277,9 +277,6 @@ def get_semantic_context_for_query_chroma(
         full_context = "\n\n".join(context_list)
 
         print(f'-> SUCCESS: Semantic context retrieved from ChromaDB (Top score: {top_docs[0]["score"]:.4f})')
-        print('_'*100+'\n')
-        print(full_context)
-        print('\n'+'_'*100)
         return full_context
 
     except Exception as e:
@@ -422,9 +419,7 @@ def get_semantic_context_and_files(
     print(f"  Top score: {top_docs[0]['score']:.4f} from collection: {top_docs[0]['collection']}")
     print(f"  Logical tables: {[extract_logical_table_from_collection(c, collection_prefix) for c in unique_collections]}")
     print(f"  Mapped to parquet files: {parquet_paths}")
-    print('_'*100+'\n')
-    print(full_context)
-    print('\n'+'_'*100)
+
     
     return full_context, parquet_paths
 

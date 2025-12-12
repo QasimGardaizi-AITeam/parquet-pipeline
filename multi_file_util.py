@@ -42,9 +42,11 @@ def identify_required_tables(llm_client: AzureOpenAI, user_question: str, deploy
         {catalog_schema}
         --- END CATALOG ---
         CRITICAL RULES:
-        1. **Analyze ALL filtering criteria** in the user's question (dates, product types, names, categories, etc.)
-        2. **Map each filter to its column**: Identify which table contains each column needed for filtering
-        3. **Include ALL tables**: If filters require columns from multiple tables, you MUST list ALL of them"""
+        1. **Analyze ALL required columns**: Identify ALL columns needed for filtering, selection, and aggregation in the user's question.
+        2. **Map ALL required columns to their table(s)**: Identify which logical table contains each column needed for the query.
+        3. **STRICT SELECTIVITY**: A logical table MUST contain at least one of the essential columns required by the query (i.e., columns in the SELECT, WHERE, or GROUP BY clauses) to be included in the final list. DO NOT include tables that lack any of the columns required by the query.
+        4. **Include ALL relevant tables**: If required columns are split across multiple relevant tables (e.g., for a JOIN or UNION), you MUST list ALL of them.
+        5. **Do Not Joined Unnamed Column with other Unnamed Column"""
     
     try:
         response = llm_client.chat.completions.create(

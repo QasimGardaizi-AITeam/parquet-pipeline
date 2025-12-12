@@ -359,6 +359,7 @@ def generate_and_execute_query(
 ) -> Dict[str, pd.DataFrame]:
     """
     Orchestrates the multi-file query flow.
+    MODIFIED: Now performs file identification and context loading dynamically for each sub-query.
     """
     if not llm_client:
         return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["FATAL: LLM client not initialized."]}) }
@@ -369,72 +370,91 @@ def generate_and_execute_query(
 
     overall_start_time = time.time()
 
-    # 1. FILE/TABLE IDENTIFICATION
-    required_tables_names, join_key = identify_required_tables(
-        llm_client, 
-        user_question, 
-        config.azure_openai.llm_deployment_name, 
-        global_catalog_string  # Use string for LLM
-    )
-
-    target_parquet_files = []
-    use_union_by_name = False
-
-    if required_tables_names == ["*"]:
-        target_parquet_files = [config.azure_storage.glob_pattern]
-        use_union_by_name = True
-        print(f"-> STEP 1: Identified ALL available files/tables via glob: {target_parquet_files[0]} (Mode: UNION_BY_NAME)")
-    else:
-        for name in required_tables_names:
-            matching_paths = [p for p in all_parquet_files if os.path.splitext(os.path.basename(p))[0] == name]
-            if matching_paths:
-                target_parquet_files.append(matching_paths[0])
-        
-        mode = "JOIN" if len(target_parquet_files) > 1 and join_key else "UNION_BY_NAME (Fallback)"
-        use_union_by_name = True if mode != "JOIN" else False
-        
-        print(f"-> STEP 2: Identified specific logical tables: {required_tables_names} -> {target_parquet_files} (Join Key: {join_key if join_key else 'N/A'} | Mode: {mode})")
-
-    if not target_parquet_files:
-        print("[CRITICAL] File identification resulted in no usable paths. Aborting.")
-        return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["No relevant files could be identified."]}) }
-        
-    # 2. Get SCHEMA and SAMPLE DATA
-    parquet_schema, df_sample = get_parquet_context(
-        target_parquet_files,
-        use_union_by_name=use_union_by_name,
-        all_parquet_glob_pattern=config.azure_storage.glob_pattern,
-        config=config
-    )
-
-    # 3. DECOMPOSITION
-    print("-> STEP 3: Decomposing Multi-Intent Query...")
+    # 1. DECOMPOSITION
+    print("-> STEP 1: Decomposing Multi-Intent Query...")
     sub_queries = decompose_multi_intent_query(llm_client, user_question, config.azure_openai.llm_deployment_name)
     
     if len(sub_queries) == 1 and sub_queries[0] == user_question:
         print("-> Decomposition Success: Single-Topic Flow Detected.")
     else:
         print(f"-> Decomposition Success: Found {len(sub_queries)} sub-queries.")
-        print(f"-> STEP 4: Multi-Topic Flow Detected. Sub-queries: {sub_queries}")
+        print(f"-> STEP 2: Multi-Topic Flow Detected. Sub-queries: {sub_queries}")
         print("-> Executing sub-queries concurrently...")
+
+    # 2. PREPARE CONTEXT FOR PARALLEL EXECUTION (DYNAMIC CONTEXT CREATION)
+    tasks = []
+    
+    for sub_query in sub_queries:
+        # A. FILE/TABLE IDENTIFICATION for the *specific* sub-query text
+        sub_required_tables, sub_join_key = identify_required_tables(
+            llm_client, 
+            sub_query, # <-- CRITICAL FIX: Use the specific sub_query text
+            config.azure_openai.llm_deployment_name, 
+            global_catalog_string # Using global string for LLM context
+        )
+        
+        # B. Map table names to physical file paths
+        sub_target_parquet_files = []
+        sub_use_union_by_name = False
+
+        if sub_required_tables == ["*"]:
+            # Fallback to all files (glob)
+            sub_target_parquet_files = [config.azure_storage.glob_pattern]
+            sub_use_union_by_name = True
+        else:
+            for name in sub_required_tables:
+                matching_paths = [p for p in all_parquet_files if os.path.splitext(os.path.basename(p))[0] == name]
+                if matching_paths:
+                    sub_target_parquet_files.append(matching_paths[0])
+
+            # Determine join mode
+            mode = "JOIN" if len(sub_target_parquet_files) > 1 and sub_join_key else "UNION_BY_NAME"
+            sub_use_union_by_name = True if mode == "UNION_BY_NAME" else False
+
+        if not sub_target_parquet_files:
+             print(f"[WARNING] Could not identify files for query: {sub_query}. Skipping.")
+             continue
+             
+        # C. GET SCHEMA and SAMPLE DATA SPECIFIC TO THE SUB-QUERY FILES
+        sub_parquet_schema, sub_df_sample = get_parquet_context(
+            sub_target_parquet_files,
+            use_union_by_name=sub_use_union_by_name,
+            all_parquet_glob_pattern=config.azure_storage.glob_pattern,
+            config=config
+        )
+
+        print(f"-> STEP 3: Sub-query '{sub_query[:50]}...' -> Identified tables: {sub_required_tables} -> {sub_target_parquet_files} (Mode: {mode})")
+
+        tasks.append({
+            "query": sub_query,
+            "schema": sub_parquet_schema,
+            "sample": sub_df_sample,
+            "files": sub_target_parquet_files,
+            "join_key": sub_join_key
+        })
+        
+    if not tasks:
+        print("[CRITICAL] No tasks generated for execution. Aborting.")
+        return {"ORCHESTRATION_FAILURE": pd.DataFrame({'Error': ["No executable tasks were generated."]}) }
 
     final_combined_results: Dict[str, pd.DataFrame] = {}
     
-    # 4. PARALLEL EXECUTION 
-    with ThreadPoolExecutor(max_workers=min(len(sub_queries), 5)) as executor: 
+    # 3. PARALLEL EXECUTION 
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 5)) as executor: 
         
+        # The executor now uses the task-specific, narrowed context
         future_to_query = {
             executor.submit(
                 process_single_query, 
                 llm_client, 
-                sub_query, 
-                parquet_schema, 
-                df_sample, 
-                target_parquet_files, 
-                global_catalog_dict,  # FIXED: Pass dictionary
-                join_key, 
+                task["query"], 
+                task["schema"], 
+                task["sample"], 
+                task["files"], 
+                global_catalog_dict,  
+                task["join_key"], 
                 config
-            ): sub_query for sub_query in sub_queries
+            ): task["query"] for task in tasks
         }
 
         for future in as_completed(future_to_query):
