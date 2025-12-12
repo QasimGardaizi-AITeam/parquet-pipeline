@@ -1,6 +1,5 @@
 import os
 import sys
-from dotenv import load_dotenv
 from openai import AzureOpenAI
 from pymongo import MongoClient
 from typing import List, Dict
@@ -105,4 +104,7 @@ def get_semantic_context_for_query(query: str, file_name: str, collection_prefix
     
     print(f'-> SUCCESS: Semantic context retrieved (Score: {retrieved_docs[0]["score"]:.4f}). Context preview:')
     
+    print('_\n'*100)
+    print(full_context)
+    print('\n_'*100)
     return full_context

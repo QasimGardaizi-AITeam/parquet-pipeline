@@ -2,7 +2,6 @@ import os
 import sys
 import pandas as pd
 import time
-from dotenv import load_dotenv
 from openai import AzureOpenAI
 from pymongo import MongoClient
 import pymongo 

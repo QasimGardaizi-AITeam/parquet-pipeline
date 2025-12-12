@@ -2,7 +2,6 @@ import os
 import sys
 import pandas as pd
 import time
-from dotenv import load_dotenv
 from openai import AzureOpenAI
 import chromadb
 from chromadb.config import Settings
@@ -20,11 +19,14 @@ config = get_config(VectorDBType.CHROMADB)
 
 # Initialize Azure OpenAI client
 try:
+    # Define openai_client here so it can be passed to the worker function
     openai_client = AzureOpenAI(
         azure_endpoint=config.azure_openai.embedding_endpoint,
         api_key=config.azure_openai.embedding_api_key,
         api_version=config.azure_openai.embedding_api_version
     )
+    # Adding a check to confirm the client works (optional, but good practice)
+    # You might consider moving the client creation to a utility function or the main pipeline script.
 except Exception as e:
     print(f"FATAL ERROR (ChromaDB Ingestion): Error initializing Azure OpenAI client: {e}")
     sys.exit(1)
@@ -115,10 +117,12 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
     return chunks
 
 
-def get_embedding_for_chunk(chunk_texts: List[str]) -> List[List[float]]:
+# --- MODIFIED: Client is now passed as an argument for thread safety ---
+def get_embedding_for_chunk(client: AzureOpenAI, chunk_texts: List[str]) -> List[List[float]]:
     """Worker function to get embeddings for a batch of chunk texts."""
     try:
-        response = openai_client.embeddings.create(
+        # Use the passed client
+        response = client.embeddings.create(
             model=config.azure_openai.embedding_deployment_name,
             input=chunk_texts,
         )
@@ -131,33 +135,53 @@ def get_embedding_for_chunk(chunk_texts: List[str]) -> List[List[float]]:
 # ------------------------------------------------
 # 3. Core Ingestion Function for ChromaDB
 # ------------------------------------------------
+def _sanitize_collection_name(raw_name: str) -> str:
+    """
+    Ensure Chroma collection name follows constraints:
+    3-512 chars, [a-zA-Z0-9._-], start/end alnum.
+    """
+    import re
+    # Replace spaces with underscores and drop disallowed chars
+    name = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw_name).strip("_-.")
+    # Enforce length constraints
+    if len(name) < 3:
+        name = (name + "_col")[:3]
+    if len(name) > 512:
+        name = name[:512]
+    # Ensure starts/ends with alnum
+    name = re.sub(r"^[^a-zA-Z0-9]+", "", name)
+    name = re.sub(r"[^a-zA-Z0-9]+$", "", name)
+    # Final fallback
+    if not name:
+        name = "col_default"
+    return name
+
+
 def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefix: str = None) -> Union[bool, str]:
     """
     Loads data from the given Parquet file (local or Azure URI),
     chunks, embeds (in parallel), and inserts into ChromaDB.
     """
 
+    # NOTE: openai_client and chroma_client are global and used here.
+    # If this function is imported and called elsewhere, those globals must be defined first.
+    
     if collection_prefix is None:
         collection_prefix = config.vector_db.chromadb.collection_prefix
 
     # 1. Determine Dynamic Collection Name
     base_name = os.path.splitext(os.path.basename(file_path.split('/')[-1]))[0]
 
-    # ChromaDB collection names must be alphanumeric with underscores/hyphens, 3-63 chars
-    if sheet_name:
-        sheet_name_clean = "".join(c for c in sheet_name if c.isalnum() or c in ('_',)).rstrip().lower()
-        COLLECTION_NAME = f"{collection_prefix}_{base_name}"
-    else:
-        COLLECTION_NAME = f"{collection_prefix}_{base_name}"
-
-    # Ensure collection name meets ChromaDB requirements
-    COLLECTION_NAME = COLLECTION_NAME.replace('-', '_')[:63]
+    raw_collection_name = f"{collection_prefix}_{base_name}"
+    COLLECTION_NAME = _sanitize_collection_name(raw_collection_name)
 
     print(f"\n--- Starting ChromaDB Ingestion for Collection: '{COLLECTION_NAME}' (Source: {os.path.basename(file_path)}) ---")
 
     # 2. Load Data
     try:
         df = read_parquet_from_azure(file_path)
+        if df.empty or len(df.columns) == 0:
+            return f"Skipped ingestion: no data/columns in {file_path}"
         print(f"Data loaded: {len(df)} rows.")
 
     except FileNotFoundError:
@@ -183,7 +207,8 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
     try:
         with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
             future_to_batch = {
-                executor.submit(get_embedding_for_chunk, batch): batch
+                # --- MODIFIED: Passing openai_client explicitly ---
+                executor.submit(get_embedding_for_chunk, openai_client, batch): batch 
                 for batch in text_batches
             }
 
