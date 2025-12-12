@@ -115,11 +115,35 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
         
         --- CLASSIFICATION RULES ---
         1. **SEMANTIC_SEARCH**: Choose this intent if the query involves:
-           a. **Fuzzy Matching / Names**: Searching for specific entities like applicant names, or conceptual descriptions. This is critical for handling potential misspellings or variations in names.
-           b. **Conceptual lookups**: Finding a value based on a non-indexed, descriptive field.
+           a. **Fuzzy Matching / Names**: Searching for specific entities like person names, company names, or any proper nouns. This is critical for handling potential misspellings, variations in names, or case differences.
+           b. **String-based Lookups**: When the user provides a string value to search for in text columns (e.g., "Moscow", "truck", "Great Knowledge", "Premium Package"). This includes:
+              - Product names, descriptions, or titles
+              - Location names (cities, countries, addresses)
+              - Category names or labels
+              - Any user-provided text that needs to be matched against string columns
+              - Queries with case variations (e.g., "TRUCK", "Truck", "truck" should all be treated as needing fuzzy matching)
+           c. **Conceptual/Descriptive lookups**: Finding values based on non-indexed, descriptive fields or natural language descriptions.
+           d. **Pattern Matching**: When the user's query suggests they don't know the exact format or spelling (e.g., "find data about Moscow" when the actual value might be "moscow", "MOSCOW", or "Moscow, Russia")
+        
         2. **SQL_QUERY**: Choose this intent if the query involves:
-           a. **Direct calculations/Aggregation**: Functions like SUM, AVG, COUNT, MAX, MIN
-           b. **Precise Filtering**: Filtering on structured numeric, categorical, or date columns
+           a. **Direct calculations/Aggregation**: Functions like SUM, AVG, COUNT, MAX, MIN, TOTAL
+           b. **Precise Filtering on Structured Data**: Filtering on numeric columns (IDs, amounts, quantities), dates, booleans, or exact categorical values that are clearly structured
+           c. **Mathematical Operations**: Comparisons, arithmetic operations on numeric fields
+           d. **Date/Time Operations**: When filtering or aggregating by specific dates, date ranges, or time periods
+        
+        **IMPORTANT DECISION CRITERIA:**
+        - If the user provides ANY text/string value to search for (names, descriptions, labels, locations, categories), choose **SEMANTIC_SEARCH**
+        - If the query involves finding/filtering by a string that might have variations, typos, or case differences, choose **SEMANTIC_SEARCH**
+        - Only choose **SQL_QUERY** when the query is purely about numeric operations, date operations, or exact structured data filtering WITHOUT any string matching requirements
+        - When in doubt about string values, prefer **SEMANTIC_SEARCH** to handle variations gracefully
+        
+        **EXAMPLES:**
+        - "What is the credit score for Harrison?" → **SEMANTIC_SEARCH** (name lookup)
+        - "Find max discount for Moscow truck" → **SEMANTIC_SEARCH** (string "Moscow" and "truck" need fuzzy matching)
+        - "Show me data for Premium Package" → **SEMANTIC_SEARCH** (text matching for "Premium Package")
+        - "What is the total amount?" → **SQL_QUERY** (pure aggregation, no string lookup)
+        - "Count all records where date > 2024" → **SQL_QUERY** (date filtering, no string matching)
+        - "Average price for product category 'Electronics'" → **SEMANTIC_SEARCH** (involves string "Electronics")
 
         Your output MUST be a single JSON object with the key 'intent'.
         Example: {{"intent": "SEMANTIC_SEARCH"}}
@@ -500,7 +524,9 @@ def main():
     # Example: Multi-Intent Query
     generate_and_execute_query(
         llm_client,
-        "Kathleen Vasqez",
+        # "What is the average Final Weight (g) for all runs conducted at a Storage temperature of $40^\circ C$ compared to those at $25^\circ C$",
+        # "What is the maximum Span value recorded under the $40^\circ C$ / 75%RH condition, and which SprayTec Device ID produced this result?",
+        "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access

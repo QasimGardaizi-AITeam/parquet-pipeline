@@ -208,7 +208,8 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     CRITICAL FIX: This function uses a thread-local DuckDB connection to avoid 
     concurrency issues with the main global connection during parallel ingestion.
     """
-    base_name = os.path.splitext(os.path.basename(input_path))[0]
+    raw_base_name = os.path.splitext(os.path.basename(input_path))[0]
+    base_name = raw_base_name.replace(' ', '_').replace('.', '_').strip('_')
     azure_uris = []
     
     print(f"[INFO] Scanning '{os.path.basename(input_path)}' for sheets...")

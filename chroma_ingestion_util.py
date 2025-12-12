@@ -135,6 +135,28 @@ def get_embedding_for_chunk(client: AzureOpenAI, chunk_texts: List[str]) -> List
 # ------------------------------------------------
 # 3. Core Ingestion Function for ChromaDB
 # ------------------------------------------------
+def _sanitize_collection_name(raw_name: str) -> str:
+    """
+    Ensure Chroma collection name follows constraints:
+    3-512 chars, [a-zA-Z0-9._-], start/end alnum.
+    """
+    import re
+    # Replace spaces with underscores and drop disallowed chars
+    name = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw_name).strip("_-.")
+    # Enforce length constraints
+    if len(name) < 3:
+        name = (name + "_col")[:3]
+    if len(name) > 512:
+        name = name[:512]
+    # Ensure starts/ends with alnum
+    name = re.sub(r"^[^a-zA-Z0-9]+", "", name)
+    name = re.sub(r"[^a-zA-Z0-9]+$", "", name)
+    # Final fallback
+    if not name:
+        name = "col_default"
+    return name
+
+
 def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefix: str = None) -> Union[bool, str]:
     """
     Loads data from the given Parquet file (local or Azure URI),
@@ -150,21 +172,16 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
     # 1. Determine Dynamic Collection Name
     base_name = os.path.splitext(os.path.basename(file_path.split('/')[-1]))[0]
 
-    # ChromaDB collection names must be alphanumeric with underscores/hyphens, 3-63 chars
-    if sheet_name:
-        sheet_name_clean = "".join(c for c in sheet_name if c.isalnum() or c in ('_',)).rstrip().lower()
-        COLLECTION_NAME = f"{collection_prefix}_{base_name}"
-    else:
-        COLLECTION_NAME = f"{collection_prefix}_{base_name}"
-
-    # Ensure collection name meets ChromaDB requirements
-    COLLECTION_NAME = COLLECTION_NAME.replace('-', '_')[:63]
+    raw_collection_name = f"{collection_prefix}_{base_name}"
+    COLLECTION_NAME = _sanitize_collection_name(raw_collection_name)
 
     print(f"\n--- Starting ChromaDB Ingestion for Collection: '{COLLECTION_NAME}' (Source: {os.path.basename(file_path)}) ---")
 
     # 2. Load Data
     try:
         df = read_parquet_from_azure(file_path)
+        if df.empty or len(df.columns) == 0:
+            return f"Skipped ingestion: no data/columns in {file_path}"
         print(f"Data loaded: {len(df)} rows.")
 
     except FileNotFoundError:
