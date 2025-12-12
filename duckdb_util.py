@@ -137,7 +137,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                             for index, row in schema_df.iterrows()]
             schema_string = f"TABLE SCHEMA (UNIONED):\n" + "\n".join(schema_lines)
             
-            df_sample = conn.execute(f"{query} LIMIT 50").fetchdf()
+            df_sample = conn.execute(f"{query} LIMIT 30").fetchdf()
             
         else:
             # --- JOIN MODE ---
@@ -167,7 +167,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                     alias = f"T{i+1}"
 
                     # Fetch sample from each file
-                    sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 50").fetchdf()
+                    sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 30").fetchdf()
 
                     # Add table identifier as a column to help LLM understand which table this is from
                     sample.insert(0, '__TABLE__', f"{alias}:{logical_name}")
