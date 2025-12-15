@@ -16,7 +16,6 @@ load_dotenv()
 
 class VectorDBType(Enum):
     """Supported vector database types"""
-    MONGODB = "mongodb"
     CHROMADB = "chromadb"
 
 
@@ -117,33 +116,6 @@ class AzureStorageConfig:
 
 
 @dataclass
-class MongoDBConfig:
-    """MongoDB Atlas configuration"""
-    # Non-default fields
-    uri: str
-    
-    # Default fields
-    database_name: str = "vector_rag_db"
-    vector_index_name: str = "vector_index"
-
-    @classmethod
-    def from_env(cls):
-        """Load configuration from environment variables"""
-        uri = os.getenv("MONGO_URI")
-        database_name = os.getenv("MONGO_DATABASE_NAME", "vector_rag_db")
-        vector_index_name = os.getenv("MONGO_VECTOR_INDEX_NAME", "vector_index")
-
-        if not uri:
-            raise ValueError("Missing MONGO_URI in environment variables.")
-
-        return cls(
-            uri=uri,
-            database_name=database_name,
-            vector_index_name=vector_index_name
-        )
-
-
-@dataclass
 class ChromaDBConfig:
     """ChromaDB configuration"""
     # Default fields
@@ -165,24 +137,18 @@ class ChromaDBConfig:
 
 @dataclass
 class VectorDBConfig:
-    """Vector database configuration - supports MongoDB or ChromaDB"""
+    """Vector database configuration"""
     # Non-default fields
     db_type: VectorDBType
     
     # Default fields
-    mongodb: Optional[MongoDBConfig] = None
     chromadb: Optional[ChromaDBConfig] = None
 
     @classmethod
     def from_env(cls, db_type: VectorDBType = VectorDBType.CHROMADB):
         """Load configuration based on selected database type"""
-        if db_type == VectorDBType.MONGODB:
-            try:
-                mongodb_config = MongoDBConfig.from_env()
-                return cls(db_type=db_type, mongodb=mongodb_config)
-            except ValueError as e:
-                print(f"[WARNING] MongoDB config failed: {e}. Falling back to ChromaDB.")
-                db_type = VectorDBType.CHROMADB
+
+        db_type = VectorDBType.CHROMADB
 
         # Default to ChromaDB
         chromadb_config = ChromaDBConfig.from_env()

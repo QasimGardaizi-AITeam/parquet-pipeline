@@ -78,9 +78,7 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
         return pd.read_parquet(file_path)
 
 
-# ------------------------------------------------
 # 2. Utility Functions
-# ------------------------------------------------
 
 def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) -> List[Dict[str, Any]]:
     """Dynamically chunk a DataFrame into text blocks."""
@@ -240,7 +238,7 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
         # Create new collection
         collection = chroma_client.create_collection(
             name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"}  # Use cosine similarity like MongoDB
+            metadata={"hnsw:space": "cosine"} 
         )
         print(f"[INFO] Created new ChromaDB collection '{COLLECTION_NAME}'")
 
