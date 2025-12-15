@@ -1,5 +1,3 @@
-# multi_file_util.py (Updated with clearer LLM instructions)
-
 import json
 from openai import AzureOpenAI
 from typing import List, Dict, Any, Tuple

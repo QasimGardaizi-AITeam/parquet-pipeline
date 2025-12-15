@@ -42,6 +42,7 @@ except Exception as e:
     sys.exit(1)
 
 
+
 # HELPER FUNCTIONS
 
 def extract_logical_table_from_collection(collection_name: str, collection_prefix: str = None) -> str:

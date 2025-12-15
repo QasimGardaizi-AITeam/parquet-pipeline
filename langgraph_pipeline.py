@@ -3,13 +3,12 @@ LangGraph RAG Pipeline
 A graph-based orchestration system for multi-intent query processing with hybrid RAG.
 """
 
-import operator
-from typing import Annotated, TypedDict, List, Dict, Literal, Optional, Tuple, Any
+from typing import TypedDict, List, Dict, Literal, Optional
 from typing_extensions import TypedDict
 import pandas as pd
 from openai import AzureOpenAI
 import time
-import json # New import for serialization
+import json 
 import os
 
 from langgraph.graph import StateGraph, END
@@ -613,9 +612,7 @@ def generate_summary(state: GraphState) -> GraphState:
         return state
 
 
-# ============================================================================
 # CONDITIONAL EDGES
-# ============================================================================
 
 def should_continue_processing(state: GraphState) -> Literal["identify_sources", "generate_summary"]:
     """
@@ -629,10 +626,7 @@ def should_continue_processing(state: GraphState) -> Literal["identify_sources",
     else:
         return "generate_summary"
 
-
-# ============================================================================
 # GRAPH CONSTRUCTION
-# ============================================================================
 
 def create_rag_graph() -> StateGraph:
     """
@@ -703,10 +697,7 @@ def create_rag_graph() -> StateGraph:
     
     return workflow
 
-
-# ============================================================================
 # MAIN EXECUTION INTERFACE
-# ============================================================================
 
 def run_rag_pipeline(
     user_question: str,
@@ -810,9 +801,6 @@ def run_rag_pipeline(
         return {}
 
 
-# ============================================================================
-# EXAMPLE USAGE
-# ============================================================================
 
 if __name__ == "__main__":
     """
@@ -877,9 +865,9 @@ if __name__ == "__main__":
     
     # Example queries
     queries = [
-        "What is the total loan amount for Kathleen Vasquez?",
-        "List all products in the OTC category and their total sales",
-        "What were the volumes for Canada Kit in each month from January to June?"
+        "What is the total loan amount for Kathleen Vasquez?"
+        # "List all products in the OTC category and their total sales",
+        # "What were the volumes for Canada Kit in each month from January to June?"
     ]
     
     # Run pipeline for each query
