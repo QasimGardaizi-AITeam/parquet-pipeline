@@ -147,27 +147,51 @@ def get_relevant_collections_with_scores(
     query: str,
     collection_prefix: str = None,
     top_k: int = 10,
-    score_threshold: float = 0.5
+    score_threshold: float = 0.5,
+    allowed_collections: List[str] = None
 ) -> List[Dict[str, any]]:
     """
     Identifies relevant collections for a query by checking relevance scores.
-    
+
+    Args:
+        query: The search query
+        collection_prefix: Prefix for collection names (uses config default if None)
+        top_k: Maximum number of collections to return
+        score_threshold: Minimum relevance score for a collection to be included
+        allowed_collections: Optional list of collection names or logical table names
+                            to filter. If provided, only these collections will be
+                            checked instead of all collections in the database.
+                            Can be either full collection names (e.g., 'data_source_loan_Data')
+                            or logical table names (e.g., 'loan_Data').
+
     Returns:
         List of dicts with keys: collection_name, score, logical_table
     """
     if collection_prefix is None:
         collection_prefix = config.vector_db.chromadb.collection_prefix
-    
+
     try:
         query_vector = get_query_embedding(query)
         if not query_vector:
             return []
-        
+
         all_collections = chroma_client.list_collections()
         collection_names = [col.name for col in all_collections if col.name.startswith(collection_prefix)]
-        
+
+        # Filter to only allowed collections if specified
+        if allowed_collections:
+            filtered_names = []
+            for col_name in collection_names:
+                logical_table = extract_logical_table_from_collection(col_name, collection_prefix)
+                # Check if either the full collection name or logical table name is in allowed list
+                if col_name in allowed_collections or logical_table in allowed_collections:
+                    filtered_names.append(col_name)
+            collection_names = filtered_names
+            print(f"[INFO] Filtered to {len(collection_names)} collection(s) from allowed list: {collection_names}")
+
         if not collection_names:
-            print(f"[WARNING] No collections found with prefix '{collection_prefix}'")
+            print(f"[WARNING] No collections found with prefix '{collection_prefix}'" +
+                  (f" matching allowed list" if allowed_collections else ""))
             return []
         
         collection_scores = []
@@ -287,12 +311,13 @@ def get_semantic_context_and_files(
     catalog: Dict = None,
     collection_prefix: str = None,
     limit: int = 10,
-    score_threshold: float = 0.5
+    score_threshold: float = 0.5,
+    allowed_collections: List[str] = None
 ) -> Tuple[str, List[str]]:
     """
-    RECOMMENDED FUNCTION: Smart semantic retrieval that automatically identifies 
+    RECOMMENDED FUNCTION: Smart semantic retrieval that automatically identifies
     the most relevant collections and returns both context and parquet file paths.
-    
+
     Args:
         query: The search query
         file_name: Optional specific file to search (if known)
@@ -300,7 +325,10 @@ def get_semantic_context_and_files(
         collection_prefix: Collection prefix (uses config default if None)
         limit: Number of results to return
         score_threshold: Minimum relevance score for collection selection
-    
+        allowed_collections: Optional list of collection names or logical table names
+                            to filter. If provided, only these collections will be
+                            checked instead of all collections in the database.
+
     Returns:
         Tuple of (context_string, list_of_parquet_paths)
     """
@@ -343,17 +371,28 @@ def get_semantic_context_and_files(
             query=query,
             collection_prefix=collection_prefix,
             top_k=10,
-            score_threshold=score_threshold
+            score_threshold=score_threshold,
+            allowed_collections=allowed_collections
         )
         
         if not relevant_collections_info:
-            # Fallback: search across all collections with the prefix
+            # Fallback: search across all collections with the prefix (filtered if allowed_collections provided)
             try:
                 all_collections = chroma_client.list_collections()
                 matching_collections = [
                     col.name for col in all_collections if col.name.startswith(collection_prefix)
                 ]
-                print(f"[WARNING] No high-scoring collections; falling back to all collections with prefix '{collection_prefix}'")
+                # Apply allowed_collections filter in fallback too
+                if allowed_collections:
+                    filtered = []
+                    for col_name in matching_collections:
+                        logical_table = extract_logical_table_from_collection(col_name, collection_prefix)
+                        if col_name in allowed_collections or logical_table in allowed_collections:
+                            filtered.append(col_name)
+                    matching_collections = filtered
+                    print(f"[WARNING] No high-scoring collections; falling back to allowed collections: {matching_collections}")
+                else:
+                    print(f"[WARNING] No high-scoring collections; falling back to all collections with prefix '{collection_prefix}'")
             except Exception as e:
                 print(f"[ERROR] No relevant collections found and listing failed: {e}")
                 # Final fallback: legacy retrieval if a file hint exists
