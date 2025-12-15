@@ -595,10 +595,7 @@ def generate_summary(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
         state["summary"] = f"Failed to generate summary: {str(e)}"
         return state
 
-
-# ============================================================================
 # CONDITIONAL EDGES
-# ============================================================================
 
 def should_continue_processing(state: GraphState) -> Literal["identify_sources", "generate_summary"]:
     """
@@ -609,10 +606,7 @@ def should_continue_processing(state: GraphState) -> Literal["identify_sources",
     else:
         return "generate_summary"
 
-
-# ============================================================================
 # GRAPH CONSTRUCTION
-# ============================================================================
 
 def create_rag_graph(llm_client: AzureOpenAI) -> StateGraph:
     """
@@ -882,9 +876,9 @@ if __name__ == "__main__":
     
     # Example queries
     queries = [
-        "top 5 people with max loan?"
+        # "top 5 people with max loan?"
         # "give details of Connor Walts"
-        # "What were the volumes for Canada Kit in each month from January to June?"
+        "What were the volumes for Canada Kit in each month from January to June?"
     ]
     
     # Run pipeline for each query
