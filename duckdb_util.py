@@ -9,9 +9,7 @@ import atexit
 import time
 import threading 
 
-# Vector Database Ingestion - Using ChromaDB (Switch to vector_ingestion_util for MongoDB)
 try:
-    # ChromaDB version (alternative: use vector_ingestion_util for MongoDB)
     from chroma_ingestion_util import ingest_to_chroma_db as ingest_to_vector_db
 except ImportError:
     def ingest_to_vector_db(file_path, sheet_name=None):
@@ -166,7 +164,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                             for index, row in schema_df.iterrows()]
             schema_string = f"TABLE SCHEMA (UNIONED):\n" + "\n".join(schema_lines)
             
-            df_sample = conn.execute(f"{query} LIMIT 30").fetchdf()
+            df_sample = conn.execute(f"{query} LIMIT 20").fetchdf()
             
         else:
             # --- JOIN MODE ---
@@ -194,7 +192,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                     logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0]
                     alias = f"T{i+1}"
 
-                    sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 30").fetchdf()
+                    sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 20").fetchdf()
 
                     sample.insert(0, '__TABLE__', f"{alias}:{logical_name}")
                     sample_dfs.append(sample)

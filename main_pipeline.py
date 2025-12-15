@@ -110,7 +110,7 @@ def route_query_intent(llm_client: AzureOpenAI, user_question: str, schema: str,
         SCHEMA:
         {schema}
         
-        SAMPLE DATA (Top 50 Rows):
+        SAMPLE DATA (Top 20 Rows):
         {df_sample.to_markdown(index=False)}
         
         --- CLASSIFICATION RULES ---
@@ -296,7 +296,7 @@ def process_single_query(
         {schema}
         --- END OF SCHEMA ---
 
-        -- Sample Data (Top 30 rows from each table) --
+        -- Sample Data (Top 20 rows from each table) --
         {df_sample.to_markdown(index=False)}
         -- End of Sample Data --
 
