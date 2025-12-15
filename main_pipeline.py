@@ -549,8 +549,8 @@ def main():
     final_combined_results = generate_and_execute_query(
         llm_client,
         # "What specific type of product or package is classified as OTC B to B Wall Unit, and what were the total sales for otc-retail across Q1 and Q2 combined?",
-        # "What is the maximum Span value recorded under the $40^\circ C$ / 75%RH condition, and which SprayTec Device ID produced this result?",
-        "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
+        "What is the maximum Span value recorded under the $40^\circ C$ / 75%RH condition, and which SprayTec Device ID produced this result?",
+        # "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access

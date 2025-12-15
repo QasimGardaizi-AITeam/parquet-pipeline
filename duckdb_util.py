@@ -24,18 +24,63 @@ PERSISTENT_DUCKDB_CONN = None
 # Global Lock for Connection Setup 
 CONN_LOCK = threading.Lock()
 
-# 1. CORE DUCKDB UTILITIES
+# ----------------------------------------------------------------------
+# 1. CORE UTILITIES AND COLUMN CLEANING
+# ----------------------------------------------------------------------
+
+def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Cleans DataFrame column names for reliable SQL querying in DuckDB.
+    
+    1. Removes leading/trailing whitespace (fixes " Relative humidity.").
+    2. Replaces common non-alphanumeric characters with underscores.
+    3. Handles duplicates that arise from cleaning.
+    4. Converts to lowercase for consistency.
+    """
+    new_cols = {}
+    seen_names = set()
+    
+    for col in df.columns:
+        # Step 1: Strip, replace newlines (common in Excel headers)
+        cleaned_col = str(col).strip().replace('\n', '_').replace('\r', '_')
+        
+        # Step 2: Replace special characters with spaces/underscores for better readability before final cleaning
+        # This simplifies the name while preserving some readability (e.g., 'Final Weight (g)' -> 'Final Weight g')
+        # Use regex substitution for more robust replacement of non-word characters later
+        
+        # Replace non-alphanumeric/non-underscore characters with a single space
+        import re
+        # Convert to lowercase early for consistent handling
+        cleaned_col = re.sub(r'[^\w\s]', ' ', cleaned_col).lower()
+        
+        # Step 3: Replace sequences of whitespace with a single underscore
+        cleaned_col = re.sub(r'\s+', '_', cleaned_col)
+        
+        # Final name: clean up any leading/trailing underscores
+        final_name = cleaned_col.strip('_')
+        
+        # Step 4: Handle duplicates (e.g., if 'Col A' and 'Col.A' both clean to 'col_a')
+        original_final_name = final_name
+        suffix = 1
+        while final_name in seen_names:
+            final_name = f"{original_final_name}_{suffix}"
+            suffix += 1
+            
+        new_cols[col] = final_name
+        seen_names.add(final_name)
+        
+    df.rename(columns=new_cols, inplace=True)
+    return df
+
 def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
     """
     Initializes a NEW DuckDB connection, sets Azure Blob Storage credentials,
-    and returns the connection object. It caches the connection globally for reuse 
-    for all READ operations (which are sequential in the final execution thread).
+    and returns the connection object. It caches the connection globally for reuse.
     """
     global PERSISTENT_DUCKDB_CONN
     
     # 1. Quick check without lock
     if PERSISTENT_DUCKDB_CONN is not None:
-        # Connection already established and authenticated
         return PERSISTENT_DUCKDB_CONN
 
     # 2. Acquire lock to serialize the connection initialization process
@@ -45,38 +90,28 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
             return PERSISTENT_DUCKDB_CONN
 
         try:
-            # Create the connection
             conn = duckdb.connect()
-            
-            # 1. Install and Load Azure Extension
             conn.execute("INSTALL azure;")
             conn.execute("LOAD azure;")
             
-            # 2. Set Credentials using Connection String
             connection_string = config.azure_storage.connection_string
             
             if connection_string:
                 print(f"[INFO] Configuring persistent DuckDB Azure connection for storage: {config.azure_storage.account_name}")
                 
-                # Escape single quotes in the connection string by doubling them
                 escaped_conn_str = connection_string.replace("'", "''")
                 conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
 
                 print("[SUCCESS] Persistent DuckDB Azure authentication configured successfully.")
 
-                # Warm up the Azure connection with a lightweight test query
-                # This ensures the connection is fully established before real queries run
+                # Warm up the Azure connection
                 try:
-                    # Test the connection by listing files (lightweight operation)
-                    # warmup_glob = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/*.parquet"
                     known_file = f"azure://{config.azure_storage.account_name}.blob.core.windows.net/{config.azure_storage.container_name}/parquet_files/file1_Sheet1.parquet"
                     conn.execute(f"SELECT * FROM glob('{known_file}') LIMIT 1").fetchall()
                     print("[INFO] Azure connection warmed up and ready.")
                 except Exception as warmup_err:
-                    # Non-fatal: connection might still work for actual queries
                     print(f"[WARNING] Connection warm-up failed (non-fatal): {warmup_err}")
 
-                # Store the connection globally for reuse
                 PERSISTENT_DUCKDB_CONN = conn
                 return conn
             else:
@@ -87,9 +122,8 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
             import traceback
             traceback.print_exc(file=sys.stdout)
             print(f"[CRITICAL ERROR] Failed to set up DuckDB connection: {e}")
-            # Ensure the global connection is None on failure
             PERSISTENT_DUCKDB_CONN = None 
-            raise  # Re-raise to stop execution if auth fails
+            raise
 
 def close_persistent_duckdb_connection():
     """Closes the globally stored DuckDB connection."""
@@ -99,7 +133,6 @@ def close_persistent_duckdb_connection():
         PERSISTENT_DUCKDB_CONN.close()
         PERSISTENT_DUCKDB_CONN = None
 
-# Register the cleanup function to be called on program exit
 atexit.register(close_persistent_duckdb_connection)
 
 
@@ -107,13 +140,11 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
     """
     Dynamically gets the combined schema and top 50 rows from each Parquet file
     using the persistent DuckDB connection.
-    In JOIN mode, samples from ALL files and combines them with a __TABLE__ identifier.
     """
     try:
         if not parquet_paths:
             return "TABLE SCHEMA: No Parquet files specified.", pd.DataFrame()
         
-        # 1. Get the persistent connection (will connect and authenticate if needed)
         conn = setup_duckdb_azure_connection(config)
 
         schema_string = ""
@@ -142,7 +173,6 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
             all_schema_lines = ["TABLE SCHEMAS (JOIN MODE)"]
             
             for i, p_path in enumerate(parquet_paths):
-                # Ensure the path splitting handles potential Azure URIs correctly
                 logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0] 
                 alias = f"T{i+1}"
                 
@@ -164,17 +194,13 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                     logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0]
                     alias = f"T{i+1}"
 
-                    # Fetch sample from each file
                     sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 30").fetchdf()
 
-                    # Add table identifier as a column to help LLM understand which table this is from
                     sample.insert(0, '__TABLE__', f"{alias}:{logical_name}")
                     sample_dfs.append(sample)
 
-                # Combine all samples vertically
                 df_sample = pd.concat(sample_dfs, ignore_index=True)
                  
-        # NOTE: Connection remains open
         return schema_string, df_sample
         
     except Exception as e:
@@ -185,26 +211,23 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
 def execute_duckdb_query(query: str, config: Any) -> pd.DataFrame:
     """Executes a SQL query against the Azure Parquet files using the persistent DuckDB connection."""
     try:
-        # 1. Get the persistent connection
         conn = setup_duckdb_azure_connection(config)
         
-        # Execute query
         result_df = conn.execute(query).fetchdf()
         
-        # NOTE: Connection remains open
         return result_df
     except Exception as e:
-        # Ensure errors are returned cleanly
         return pd.DataFrame({'Error': [str(e)]})
 
+
+# ----------------------------------------------------------------------
+# 2. INGESTION AND WRITING
+# ----------------------------------------------------------------------
 
 def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
     """
     Reads Excel, converts each sheet to a Parquet file locally, uploads to Azure,
-    and returns the list of Azure URIs.
-    
-    This function uses a thread-local DuckDB connection to avoid 
-    concurrency issues with the main global connection during parallel ingestion.
+    and returns the list of Azure URIs. Includes column name cleaning.
     """
     raw_base_name = os.path.splitext(os.path.basename(input_path))[0]
     base_name = raw_base_name.replace(' ', '_').replace('.', '_').strip('_')
@@ -213,25 +236,21 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     print(f"[INFO] Scanning '{os.path.basename(input_path)}' for sheets...")
     
     try:
-        # Read Excel sheets using Pandas (thread-safe)
         excel_sheets = pd.read_excel(input_path, sheet_name=None, engine='openpyxl')
     except Exception as e:
         print(f"[ERROR] Failed to read Excel file {input_path}: {e}")
         return []
 
-    # Ensure a local directory exists for temporary files
     LOCAL_TEMP_DIR = "/tmp/parquet_cache"
     os.makedirs(LOCAL_TEMP_DIR, exist_ok=True)
     
     # 1. --- THREAD-LOCAL DUCKDB CONNECTION SETUP ---
     conn = None
     try:
-        # Create a NEW, ISOLATED DuckDB Connection for this thread
         conn = duckdb.connect()
         conn.execute("INSTALL azure;")
         conn.execute("LOAD azure;")
         
-        # Authenticate the thread-local connection
         if config.azure_storage.connection_string:
             escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
             conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
@@ -242,38 +261,37 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     # -----------------------------------------------
 
     for sheet_name, df in excel_sheets.items():
+        # --- COLUMN CLEANING STEP ---
+        try:
+            df = clean_column_names(df)
+            print(f"[INFO] Columns cleaned for sheet '{sheet_name}'. Example: {df.columns.tolist()[:3]}")
+        except Exception as clean_err:
+            print(f"[WARNING] Column cleaning failed for sheet '{sheet_name}': {clean_err}. Proceeding with original names.")
+        # ------------------------------
+        
         safe_sheet_name = "".join(c for c in sheet_name if c.isalnum() or c in (' ', '_')).rstrip()
         remote_file_name = f"{base_name}_{safe_sheet_name}.parquet"
-        
-        # 1. Write the Parquet file to a local temporary path
         local_temp_path = os.path.join(LOCAL_TEMP_DIR, remote_file_name)
         
         print(f"[INFO] Converting sheet '{sheet_name}' to Parquet and writing locally to: {local_temp_path}")
         
         try:
-            # Use the thread-local DuckDB connection for file writing
             conn.register('temp_df', df)
-            # Use zstd compression for efficiency
+            # Writing cleaned DataFrame to Parquet
             conn.execute(f"COPY temp_df TO '{local_temp_path}' (FORMAT PARQUET, COMPRESSION ZSTD);") 
             conn.unregister('temp_df')
 
-            # 2. Upload the local file to Azure Blob Storage using the SDK (thread-safe operation)
             azure_uri = upload_file_to_azure(local_temp_path, remote_file_name, config)
-            
-            # 3. Trigger ingestion to vector DB (this is also thread-local/safe)
             ingest_to_vector_db(azure_uri, sheet_name=sheet_name) 
             
             azure_uris.append(azure_uri)
             
-            # 4. Clean up local temp file
             os.remove(local_temp_path)
-            del df # Explicitly delete the DataFrame reference
+            del df 
             
         except Exception as e:
-            # Re-raise error to show the cause of failure
             print(f"[ERROR] Failed to convert/upload sheet '{sheet_name}': {e}")
             
-    # 5. Close the THREAD-LOCAL connection when this function/thread finishes its work
     if conn:
         conn.close()
         
@@ -300,8 +318,6 @@ def upload_file_to_azure(local_path: str, remote_file_path: str, config: Any) ->
         
         blob_path = f"{config.azure_storage.parquet_output_dir}{remote_file_path}"
         
-        # print(f"[INFO] Uploading {os.path.basename(local_path)} to Azure Blob: {blob_path}")
-
         with open(local_path, "rb") as data:
             container_client.upload_blob(name=blob_path, data=data, overwrite=True)
             
@@ -322,7 +338,7 @@ def build_global_catalog(parquet_paths: List[str], config: Any) -> Tuple[str, Di
         conn = setup_duckdb_azure_connection(config)
         
         catalog_lines = []
-        catalog_dict = {}  # NEW: Dictionary for programmatic access
+        catalog_dict = {}  # Dictionary for programmatic access
         
         for p_path in parquet_paths:
             logical_name = os.path.splitext(os.path.basename(p_path))[0]
@@ -333,7 +349,6 @@ def build_global_catalog(parquet_paths: List[str], config: Any) -> Tuple[str, Di
             columns = ', '.join(schema_df['column_name'].tolist())
             catalog_lines.append(f"Logical Table: {logical_name} (Columns: {columns})")
             
-            # NEW: Add to dictionary
             catalog_dict[logical_name] = {
                 'parquet_path': p_path,
                 'columns': schema_df['column_name'].tolist()
