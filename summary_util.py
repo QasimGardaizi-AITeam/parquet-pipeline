@@ -24,7 +24,7 @@ def generate_simple_summary(
         Natural language summary as a string
     """
     
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("       *** GENERATING SUMMARY ***")
     print("="*80)
     

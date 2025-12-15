@@ -70,10 +70,7 @@ def setup_llm_client(config: Config) -> AzureOpenAI:
         print(f"[ERROR] Failed to configure AzureOpenAI Client: {e}")
         raise
 
-
-# ============================================================================
 # STATE DEFINITION (Updated for serialization)
-# ============================================================================
 
 class GraphState(TypedDict):
     """
@@ -114,19 +111,16 @@ class GraphState(TypedDict):
     error: Optional[str]
     enable_debug: bool
 
-
-# ============================================================================
 # GRAPH NODES
-# ============================================================================
 
 def initialize_context(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 1: Initialize the graph with global context.
     Sets up DuckDB connection.
     """
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Initialize Context")
-    print("="*80)
+    print("-"*80)
     
     try:
         # Setup DuckDB connection
@@ -147,9 +141,9 @@ def initialize_context(state: GraphState, llm_client: AzureOpenAI) -> GraphState
 
 
 def decompose_query(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Decompose Query")
-    print("="*80)
+    print("-"*80)
     
     try:
         sub_queries = decompose_multi_intent_query(
@@ -175,9 +169,9 @@ def decompose_query(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
 
 
 def identify_data_sources(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print(f"NODE: Identify Data Sources (Query {state['query_index'] + 1}/{len(state['sub_queries'])})")
-    print("="*80)
+    print("-"*80)
     
     try:
         current_query = state["sub_queries"][state["query_index"]]
@@ -230,9 +224,9 @@ def load_query_context(state: GraphState, llm_client: AzureOpenAI) -> GraphState
     Node 4: Load schema and sample data for current query.
     Prepares context needed for routing and SQL generation.
     """
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Load Query Context")
-    print("="*80)
+    print("-"*80)
     
     try:
         schema, df_sample = get_parquet_context(
@@ -267,9 +261,9 @@ def load_query_context(state: GraphState, llm_client: AzureOpenAI) -> GraphState
 
 
 def route_query_intent(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Route Query Intent")
-    print("="*80)
+    print("-"*80)
     
     try:
         import json
@@ -332,9 +326,9 @@ def perform_semantic_search(state: GraphState, llm_client: AzureOpenAI) -> Graph
     Node 6a: Perform semantic search using vector database.
     Retrieves relevant context from ChromaDB.
     """
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Semantic Search")
-    print("="*80)
+    print("-"*80)
     
     try:
         # Prepare allowed collections based on required tables
@@ -373,7 +367,8 @@ def perform_semantic_search(state: GraphState, llm_client: AzureOpenAI) -> Graph
             del df_sample
 
         print(f"[SUCCESS] Semantic context retrieved ({len(semantic_context)} chars)")
-        
+        print("\nSemantic context preview:\n")
+        print(semantic_context)
         if state.get("enable_debug", False):
             print("\nSemantic context preview:")
             print(semantic_context[:300] + "..." if len(semantic_context) > 300 else semantic_context)
@@ -391,9 +386,9 @@ def generate_sql_query(state: GraphState, llm_client: AzureOpenAI) -> GraphState
     Node 7: Generate SQL query using LLM.
     Creates optimized SQL based on schema and context.
     """
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Generate SQL Query")
-    print("="*80)
+    print("-"*80)
     
     try:
         # Build augmentation hint based on intent
@@ -476,7 +471,7 @@ Your response MUST be valid JSON:
         state["sql_query"] = result.get("sql_query", "")
         state["sql_explanation"] = result.get("explanation", "")
         
-        print(f"[SUCCESS] SQL query generated")
+        print(f"[SUCCESS] SQL query generated\n"+state["sql_query"]+"\n")
         print(f"Explanation: {state['sql_explanation']}")
         
         if state.get("enable_debug", False):
@@ -497,9 +492,9 @@ def execute_query(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     Node 8: Execute the generated SQL query.
     Runs query against DuckDB and handles results.
     """
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Execute Query")
-    print("="*80)
+    print("-"*80)
     
     start_time = time.time()
     
@@ -566,9 +561,9 @@ def generate_summary(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     Node 10: Generate natural language summary of all results.
     Synthesizes findings into user-friendly response.
     """
-    print("\n" + "="*80)
+    print("\n" + "-"*80)
     print("NODE: Generate Summary")
-    print("="*80)
+    print("-"*80)
     
     try:
         if not state["results"]:
@@ -804,11 +799,11 @@ def run_rag_pipeline(
         
         # Display summary
         if final_state.get("summary"):
-            print("\n" + "="*80)
+            print("\n" + "-"*80)
             print("SUMMARY")
-            print("="*80)
+            print("-"*80)
             print(final_state["summary"])
-            print("="*80)
+            print("-"*80)
 
         # Deserialize final results for return value
         for query, json_str in final_state.get("results", {}).items():
@@ -879,22 +874,22 @@ if __name__ == "__main__":
     # Build global catalog
     global_catalog_string, global_catalog_dict = build_global_catalog(all_parquet_files, config)
     
-    print("\n" + "="*50)
+    print("\n" + "-"*50)
     print("GLOBAL DATA CATALOG")
-    print("="*50)
+    print("-"*50)
     print(global_catalog_string)
-    print("="*50)
+    print("-"*50)
     
     # Example queries
     queries = [
-        "What is the total loan amount for Kathleen Vasquez?"
-        # "List all products in the OTC category and their total sales",
+        "top 5 people with max loan?"
+        # "give details of Connor Walts"
         # "What were the volumes for Canada Kit in each month from January to June?"
     ]
     
     # Run pipeline for each query
     for query in queries:
-        print("\n\n" + "="*80)
+        print("\n\n" + "-"*80)
         
         results = run_rag_pipeline(
             user_question=query,
@@ -905,6 +900,6 @@ if __name__ == "__main__":
             enable_debug=False
         )
         
-        print("\n" + "="*80)
+        print("\n" + "-"*80)
     
     print("\n--- Pipeline Executed ---")
