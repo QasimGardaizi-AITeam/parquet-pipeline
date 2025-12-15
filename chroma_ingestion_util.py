@@ -44,10 +44,55 @@ except Exception as e:
     print(f"FATAL ERROR (ChromaDB Ingestion): Error initializing ChromaDB client: {e}")
     sys.exit(1)
 
+from openai import RateLimitError
 
-# ------------------------------------------------
-# Helper function to read Parquet from Azure
-# ------------------------------------------------
+def embed_with_retry(client, texts: List[str], deployment_name: str, max_retries: int = 5) -> List[List[float]]:
+    """
+    Embed texts with exponential backoff retry for rate limits.
+    
+    Args:
+        client: Azure OpenAI client
+        texts: List of texts to embed
+        deployment_name: Name of the embedding deployment
+        max_retries: Maximum number of retry attempts
+    
+    Returns:
+        List of embedding vectors
+    """
+    for attempt in range(max_retries):
+        try:
+            response = client.embeddings.create(
+                input=texts,
+                model=deployment_name
+            )
+            return [item.embedding for item in response.data]
+        
+        except RateLimitError as e:
+            if attempt == max_retries - 1:
+                raise  # Re-raise on final attempt
+            
+            # Extract wait time from error message or use exponential backoff
+            wait_time = 2 ** attempt  # 1, 2, 4, 8, 16 seconds
+            
+            # Try to parse the suggested wait time from the error message
+            error_msg = str(e)
+            if "retry after" in error_msg.lower():
+                try:
+                    import re
+                    match = re.search(r'retry after (\d+)', error_msg.lower())
+                    if match:
+                        wait_time = int(match.group(1))
+                except:
+                    pass
+            
+            print(f"[RATE LIMIT] Attempt {attempt + 1}/{max_retries} failed. Waiting {wait_time}s before retry...")
+            time.sleep(wait_time)
+        
+        except Exception as e:
+            print(f"[EMBEDDING ERROR] Unexpected error: {e}")
+            raise
+    
+    raise Exception("Failed to embed after all retries")
 
 def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
     """
@@ -119,16 +164,18 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
 def get_embedding_for_chunk(client: AzureOpenAI, chunk_texts: List[str]) -> List[List[float]]:
     """Worker function to get embeddings for a batch of chunk texts."""
     try:
-        # Use the passed client
-        response = client.embeddings.create(
-            model=config.azure_openai.embedding_deployment_name,
-            input=chunk_texts,
+        # embed_with_retry already returns List[List[float]]
+        embeddings = embed_with_retry(
+            client=client,
+            texts=chunk_texts,
+            deployment_name=config.azure_openai.embedding_deployment_name,
+            max_retries=5
         )
-        return [data.embedding for data in response.data]
+        return embeddings  # FIXED: Return embeddings directly
     except Exception as e:
         print(f"[EMBEDDING ERROR] Failed to embed batch: {e}")
         return [[]] * len(chunk_texts)
-
+    
 
 # ------------------------------------------------
 # 3. Core Ingestion Function for ChromaDB
@@ -213,6 +260,7 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
             for future in as_completed(future_to_batch):
                 batch_embeddings = future.result()
                 all_embeddings.extend(batch_embeddings)
+                time.sleep(0.5)
 
         embedding_duration = time.time() - embedding_start_time
 

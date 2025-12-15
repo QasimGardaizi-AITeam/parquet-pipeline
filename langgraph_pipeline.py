@@ -12,7 +12,6 @@ import json
 import os
 
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 
 # Import existing utilities
 from config import get_config, Config, VectorDBType
@@ -93,7 +92,6 @@ class GraphState(TypedDict):
     global_catalog_string: str
     global_catalog_dict: Dict
     config: Config
-    llm_client: AzureOpenAI
     
     # Query-specific context
     required_tables: List[str]
@@ -108,7 +106,6 @@ class GraphState(TypedDict):
     semantic_context: str
     sql_query: str
     sql_explanation: str
-    # Removed result_df: pd.DataFrame (transient)
     execution_duration: float
     
     # Outputs
@@ -122,10 +119,10 @@ class GraphState(TypedDict):
 # GRAPH NODES
 # ============================================================================
 
-def initialize_context(state: GraphState) -> GraphState:
+def initialize_context(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 1: Initialize the graph with global context.
-    Sets up LLM client and loads all parquet files.
+    Sets up DuckDB connection.
     """
     print("\n" + "="*80)
     print("NODE: Initialize Context")
@@ -135,12 +132,7 @@ def initialize_context(state: GraphState) -> GraphState:
         # Setup DuckDB connection
         setup_duckdb_azure_connection(state["config"])
         
-        # Initialize LLM client if not present
-        if "llm_client" not in state or state["llm_client"] is None:
-            state["llm_client"] = setup_llm_client(state["config"])
-        
         # Initialize results dictionary
-        # Must be Dict[str, str] to match GraphState
         state["results"] = {} 
         state["query_index"] = 0
         state["error"] = None
@@ -154,15 +146,14 @@ def initialize_context(state: GraphState) -> GraphState:
         return state
 
 
-def decompose_query(state: GraphState) -> GraphState:
-    # ... (No change required here)
+def decompose_query(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     print("\n" + "="*80)
     print("NODE: Decompose Query")
     print("="*80)
     
     try:
         sub_queries = decompose_multi_intent_query(
-            llm_client=state["llm_client"],
+            llm_client=llm_client,
             user_question=state["user_question"],
             deployment_name=state["config"].azure_openai.llm_deployment_name
         )
@@ -183,8 +174,7 @@ def decompose_query(state: GraphState) -> GraphState:
         return state
 
 
-def identify_data_sources(state: GraphState) -> GraphState:
-    # ... (No change required here)
+def identify_data_sources(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     print("\n" + "="*80)
     print(f"NODE: Identify Data Sources (Query {state['query_index'] + 1}/{len(state['sub_queries'])})")
     print("="*80)
@@ -197,7 +187,7 @@ def identify_data_sources(state: GraphState) -> GraphState:
         
         # Identify required tables
         required_tables, join_key = identify_required_tables(
-            llm_client=state["llm_client"],
+            llm_client=llm_client,
             user_question=current_query,
             deployment_name=state["config"].azure_openai.llm_deployment_name,
             catalog_schema=state["global_catalog_string"]
@@ -235,7 +225,7 @@ def identify_data_sources(state: GraphState) -> GraphState:
         return state
 
 
-def load_query_context(state: GraphState) -> GraphState:
+def load_query_context(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 4: Load schema and sample data for current query.
     Prepares context needed for routing and SQL generation.
@@ -254,7 +244,7 @@ def load_query_context(state: GraphState) -> GraphState:
         
         state["parquet_schema"] = schema
         
-        # FIX 1 & MEMORY: Convert DataFrame sample to a serializable Markdown string
+        # Convert DataFrame sample to a serializable Markdown string
         state["df_sample"] = _df_to_markdown_sample(df_sample, max_rows=20)
         
         # Explicitly delete the DataFrame to free memory immediately after conversion
@@ -276,8 +266,7 @@ def load_query_context(state: GraphState) -> GraphState:
         return state
 
 
-def route_query_intent(state: GraphState) -> GraphState:
-    # ... (Uses the updated prompt with JSON instruction from previous turn)
+def route_query_intent(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     print("\n" + "="*80)
     print("NODE: Route Query Intent")
     print("="*80)
@@ -314,7 +303,7 @@ Ensure the output strictly follows the JSON format.
 Example Output: {{"intent": "SEMANTIC_SEARCH"}} or {{"intent": "SQL_QUERY"}}
 """
         
-        response = state["llm_client"].chat.completions.create(
+        response = llm_client.chat.completions.create(
             model=state["config"].azure_openai.llm_deployment_name,
             messages=[
                 {"role": "system", "content": ROUTER_SYSTEM_PROMPT},
@@ -338,7 +327,7 @@ Example Output: {{"intent": "SEMANTIC_SEARCH"}} or {{"intent": "SQL_QUERY"}}
         state["intent"] = "SQL_QUERY"  # Default fallback
         return state
 
-def perform_semantic_search(state: GraphState) -> GraphState:
+def perform_semantic_search(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 6a: Perform semantic search using vector database.
     Retrieves relevant context from ChromaDB.
@@ -377,7 +366,7 @@ def perform_semantic_search(state: GraphState) -> GraphState:
             )
             state["parquet_schema"] = schema
             
-            # FIX 1 & MEMORY: Convert DataFrame sample to a serializable Markdown string
+            # Convert DataFrame sample to a serializable Markdown string
             state["df_sample"] = _df_to_markdown_sample(df_sample, max_rows=20)
             
             # Explicitly delete the DataFrame to free memory immediately after conversion
@@ -397,7 +386,7 @@ def perform_semantic_search(state: GraphState) -> GraphState:
         return state
 
 
-def generate_sql_query(state: GraphState) -> GraphState:
+def generate_sql_query(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 7: Generate SQL query using LLM.
     Creates optimized SQL based on schema and context.
@@ -420,7 +409,7 @@ CRITICAL: Use the above semantic context to:
 3. Apply EXACT values from semantic context in WHERE clauses
 """
         
-        # FIX 2: Generate CRITICAL path mapping for the LLM
+        # Generate CRITICAL path mapping for the LLM
         path_map = {}
         if state["required_tables"] and state["required_tables"] != ["*"]:
             for logical_name in state["required_tables"]:
@@ -474,7 +463,7 @@ Your response MUST be valid JSON:
 }}
 """
         
-        response = state["llm_client"].chat.completions.create(
+        response = llm_client.chat.completions.create(
             model=state["config"].azure_openai.llm_deployment_name,
             messages=[{"role": "user", "content": sql_prompt}],
             temperature=0.0,
@@ -503,7 +492,7 @@ Your response MUST be valid JSON:
         return state
 
 
-def execute_query(state: GraphState) -> GraphState:
+def execute_query(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 8: Execute the generated SQL query.
     Runs query against DuckDB and handles results.
@@ -526,7 +515,7 @@ def execute_query(state: GraphState) -> GraphState:
         
         state["execution_duration"] = time.time() - start_time
         
-        # FIX 1 & MEMORY: Convert temporary DataFrame to serializable JSON string
+        # Convert temporary DataFrame to serializable JSON string
         serializable_result_str = _df_to_json_result(result_df)
         
         # Store serializable string in results dictionary
@@ -559,7 +548,7 @@ def execute_query(state: GraphState) -> GraphState:
         return state
 
 
-def check_more_queries(state: GraphState) -> GraphState:
+def check_more_queries(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 9: Check if there are more sub-queries to process.
     Increments query index and determines if loop should continue.
@@ -572,7 +561,7 @@ def check_more_queries(state: GraphState) -> GraphState:
     return state
 
 
-def generate_summary(state: GraphState) -> GraphState:
+def generate_summary(state: GraphState, llm_client: AzureOpenAI) -> GraphState:
     """
     Node 10: Generate natural language summary of all results.
     Synthesizes findings into user-friendly response.
@@ -586,14 +575,14 @@ def generate_summary(state: GraphState) -> GraphState:
             state["summary"] = "No results to summarize."
             return state
         
-        # FIX 1: Convert serializable results (JSON strings) back to DataFrames for the summary utility
+        # Convert serializable results (JSON strings) back to DataFrames for the summary utility
         summarizer_results: Dict[str, pd.DataFrame] = {}
         for query, json_str in state["results"].items():
             summarizer_results[query] = _json_to_df(json_str)
 
         summary = generate_simple_summary(
             results=summarizer_results, # Use the temporary DataFrames
-            llm_client=state["llm_client"],
+            llm_client=llm_client,
             deployment_name=state["config"].azure_openai.llm_deployment_name
         )
         
@@ -612,23 +601,25 @@ def generate_summary(state: GraphState) -> GraphState:
         return state
 
 
+# ============================================================================
 # CONDITIONAL EDGES
+# ============================================================================
 
 def should_continue_processing(state: GraphState) -> Literal["identify_sources", "generate_summary"]:
     """
     Determines if there are more queries to process.
     """
-    # Note: Using state.get("error") is a weak check; a better solution would be to clear the
-    # error state on successful execution. (Implemented in execute_query)
-    
     if state["query_index"] < len(state["sub_queries"]):
         return "identify_sources"
     else:
         return "generate_summary"
 
-# GRAPH CONSTRUCTION
 
-def create_rag_graph() -> StateGraph:
+# ============================================================================
+# GRAPH CONSTRUCTION
+# ============================================================================
+
+def create_rag_graph(llm_client: AzureOpenAI) -> StateGraph:
     """
     Constructs the LangGraph RAG pipeline.
     
@@ -648,17 +639,48 @@ def create_rag_graph() -> StateGraph:
     # Create graph
     workflow = StateGraph(GraphState)
     
+    # Create wrapper functions that inject llm_client
+    def initialize_with_client(state: GraphState) -> GraphState:
+        return initialize_context(state, llm_client)
+    
+    def decompose_with_client(state: GraphState) -> GraphState:
+        return decompose_query(state, llm_client)
+    
+    def identify_with_client(state: GraphState) -> GraphState:
+        return identify_data_sources(state, llm_client)
+    
+    def load_with_client(state: GraphState) -> GraphState:
+        return load_query_context(state, llm_client)
+    
+    def route_with_client(state: GraphState) -> GraphState:
+        return route_query_intent(state, llm_client)
+    
+    def semantic_with_client(state: GraphState) -> GraphState:
+        return perform_semantic_search(state, llm_client)
+    
+    def generate_sql_with_client(state: GraphState) -> GraphState:
+        return generate_sql_query(state, llm_client)
+    
+    def execute_with_client(state: GraphState) -> GraphState:
+        return execute_query(state, llm_client)
+    
+    def check_with_client(state: GraphState) -> GraphState:
+        return check_more_queries(state, llm_client)
+    
+    def summary_with_client(state: GraphState) -> GraphState:
+        return generate_summary(state, llm_client)
+    
     # Add nodes
-    workflow.add_node("initialize", initialize_context)
-    workflow.add_node("decompose", decompose_query)
-    workflow.add_node("identify_sources", identify_data_sources)
-    workflow.add_node("load_context", load_query_context)
-    workflow.add_node("route_intent", route_query_intent)
-    workflow.add_node("semantic_search", perform_semantic_search)
-    workflow.add_node("generate_sql", generate_sql_query)
-    workflow.add_node("execute", execute_query)
-    workflow.add_node("check_more", check_more_queries)
-    workflow.add_node("generate_summary", generate_summary)
+    workflow.add_node("initialize", initialize_with_client)
+    workflow.add_node("decompose", decompose_with_client)
+    workflow.add_node("identify_sources", identify_with_client)
+    workflow.add_node("load_context", load_with_client)
+    workflow.add_node("route_intent", route_with_client)
+    workflow.add_node("semantic_search", semantic_with_client)
+    workflow.add_node("generate_sql", generate_sql_with_client)
+    workflow.add_node("execute", execute_with_client)
+    workflow.add_node("check_more", check_with_client)
+    workflow.add_node("generate_summary", summary_with_client)
     
     # Set entry point
     workflow.set_entry_point("initialize")
@@ -697,8 +719,8 @@ def create_rag_graph() -> StateGraph:
     
     return workflow
 
-# MAIN EXECUTION INTERFACE
 
+# MAIN EXECUTION INTERFACE
 def run_rag_pipeline(
     user_question: str,
     all_parquet_files: List[str],
@@ -726,21 +748,22 @@ def run_rag_pipeline(
     print("#"*80)
     print(f"\nUser Question: {user_question}")
     
-    # Create graph
-    workflow = create_rag_graph()
+    # Initialize LLM client OUTSIDE the state
+    llm_client = setup_llm_client(config)
     
-    # Compile with checkpointer for state persistence
-    memory = MemorySaver()
-    app = workflow.compile(checkpointer=memory)
+    # Create graph and pass the client
+    workflow = create_rag_graph(llm_client)
     
-    # Initialize state
+    # Compile WITHOUT checkpointer to avoid serialization issues
+    app = workflow.compile()
+    
+    # Initialize state WITHOUT llm_client
     initial_state: GraphState = {
         "user_question": user_question,
         "all_parquet_files": all_parquet_files,
         "global_catalog_string": global_catalog_string,
         "global_catalog_dict": global_catalog_dict,
         "config": config,
-        "llm_client": None,  # Will be initialized in first node
         "enable_debug": enable_debug,
         
         # These will be set during execution
@@ -771,8 +794,7 @@ def run_rag_pipeline(
     
     try:
         # Run the graph
-        config_dict = {"configurable": {"thread_id": "1"}}
-        final_state = app.invoke(initial_state, config_dict)
+        final_state = app.invoke(initial_state)
         
         total_duration = time.time() - start_time
         
@@ -885,4 +907,4 @@ if __name__ == "__main__":
         
         print("\n" + "="*80)
     
-    print("\n--- Demo Complete ---")
+    print("\n--- Pipeline Executed ---")
