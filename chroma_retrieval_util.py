@@ -219,10 +219,7 @@ def get_relevant_collections_with_scores(
         return []
 
 
-# ============================================================================
-# MAIN RETRIEVAL FUNCTIONS (PUBLIC API)
-# ============================================================================
-
+# MAIN RETRIEVAL FUNCTIONS
 def get_semantic_context_for_query_chroma(
     query: str, 
     file_name: str, 

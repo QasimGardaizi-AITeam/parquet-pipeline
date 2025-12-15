@@ -66,7 +66,7 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
 
                 print("[SUCCESS] Persistent DuckDB Azure authentication configured successfully.")
 
-                # CRITICAL FIX: Warm up the Azure connection with a lightweight test query
+                # Warm up the Azure connection with a lightweight test query
                 # This ensures the connection is fully established before real queries run
                 try:
                     # Test the connection by listing files (lightweight operation)
@@ -205,7 +205,7 @@ def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> L
     Reads Excel, converts each sheet to a Parquet file locally, uploads to Azure,
     and returns the list of Azure URIs.
     
-    CRITICAL FIX: This function uses a thread-local DuckDB connection to avoid 
+    This function uses a thread-local DuckDB connection to avoid 
     concurrency issues with the main global connection during parallel ingestion.
     """
     raw_base_name = os.path.splitext(os.path.basename(input_path))[0]

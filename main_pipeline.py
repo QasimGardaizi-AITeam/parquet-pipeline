@@ -330,8 +330,9 @@ def process_single_query(
             sql_query = sql_query[len("```sql"):].strip()
         if sql_query.endswith("```"):
             sql_query = sql_query[:-len("```")].strip()
-        
+        print('\n')
         print("-" * 50 + "SQL Query" + "-" * 50)
+        print('\n')
         print(sql_query)
             
         result_df = execute_duckdb_query(sql_query, config)
@@ -547,7 +548,7 @@ def main():
     # Example: Multi-Intent Query
     generate_and_execute_query(
         llm_client,
-        "What is the average Final Weight (g) for all runs conducted at a Storage temperature of $40^\circ C$ compared to those at $25^\circ C$ and List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
+        "What specific type of product or package is classified as OTC B to B Wall Unit, and what were the total sales for otc-retail across Q1 and Q2 combined?",
         # "What is the maximum Span value recorded under the $40^\circ C$ / 75%RH condition, and which SprayTec Device ID produced this result?",
         # "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
         all_parquet_files,
@@ -556,7 +557,6 @@ def main():
         config,
         enable_debug=False
     )
-    
     print("\n--- Execution Complete ---")
 
 if __name__ == "__main__":

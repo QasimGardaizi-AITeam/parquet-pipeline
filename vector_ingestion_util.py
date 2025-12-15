@@ -29,7 +29,6 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    # CRITICAL FIX: Increase timeouts and add retry logic
     mongo_client = MongoClient(
         config.vector_db.mongodb.uri, 
         serverSelectionTimeoutMS=60000,
@@ -364,7 +363,7 @@ def ingest_to_vector_db(file_path: str, sheet_name: str = None, collection_prefi
             delete_result = collection.delete_many({})
             print(f"Deleted {delete_result.deleted_count} old documents.")
             
-            # 6. CRITICAL FIX: Use batched insertion
+            # 6. Use batched insertion
             insertion_success = insert_documents_in_batches(
                 collection, 
                 mongo_documents, 
