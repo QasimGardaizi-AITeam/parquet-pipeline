@@ -548,9 +548,7 @@ def main():
     # Example: Multi-Intent Query
     final_combined_results = generate_and_execute_query(
         llm_client,
-        # "What specific type of product or package is classified as OTC B to B Wall Unit, and what were the total sales for otc-retail across Q1 and Q2 combined?",
-        "What is the maximum Span value recorded under the $40^\circ C$ / 75%RH condition, and which SprayTec Device ID produced this result?",
-        # "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
+        "What specific type of product or package is classified as OTC B to B Wall Unit, and what were the total sales for otc-retail across Q1 and Q2 combined?",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access
@@ -558,12 +556,44 @@ def main():
         enable_debug=False
     )
     
+    final_combined_results_2 = generate_and_execute_query(
+        llm_client,
+        "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
+        all_parquet_files,
+        global_catalog_string,  # For LLM display
+        global_catalog_dict,    # For programmatic access
+        config,
+        enable_debug=False
+    )
+    
+    final_combined_results_3 = generate_and_execute_query(
+        llm_client,
+        "Total Loan for Kathleen Vasqez",
+        all_parquet_files,
+        global_catalog_string,  # For LLM display
+        global_catalog_dict,    # For programmatic access
+        config,
+        enable_debug=False
+    )
+        
     print("\n" + "#"*80)
     print("### GENERATING INSIGHTS SUMMARY ###")
     print("#"*80)
     
     generate_simple_summary(
         results=final_combined_results,
+        llm_client=llm_client,
+        deployment_name=config.azure_openai.llm_deployment_name
+    )
+    print("\n")
+    generate_simple_summary(
+        results=final_combined_results_2,
+        llm_client=llm_client,
+        deployment_name=config.azure_openai.llm_deployment_name
+    )
+    print("\n")
+    generate_simple_summary(
+        results=final_combined_results_3,
         llm_client=llm_client,
         deployment_name=config.azure_openai.llm_deployment_name
     )

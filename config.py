@@ -202,7 +202,7 @@ class AppConfig:
     input_file_paths: List[str] = field(default_factory=lambda: [
         # '../sheets/file1.xlsx',
         # '../sheets/file2.xlsx',
-        # '../sheets/loan.xlsx'
+        '../sheets/loan.xlsx',
         '../sheets/Formulation_Test.xlsx',
         '../sheets/Formulation2.xlsx',
         '../sheets/PAID NARCAN Sample Data.xlsx'
