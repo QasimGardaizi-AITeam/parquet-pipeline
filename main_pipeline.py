@@ -562,8 +562,7 @@ def main():
     print("### GENERATING INSIGHTS SUMMARY ###")
     print("#"*80)
     
-    # Option 1: Quick summary (prints and optionally saves)
-    summary = generate_simple_summary(
+    generate_simple_summary(
         results=final_combined_results,
         llm_client=llm_client,
         deployment_name=config.azure_openai.llm_deployment_name
