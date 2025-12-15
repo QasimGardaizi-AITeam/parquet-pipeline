@@ -7,7 +7,7 @@ import atexit
 from typing import Literal, Tuple, List, Dict
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed 
-
+from summary_util import generate_simple_summary
 # --- NEW UTILITY IMPORTS ---
 try:
     from duckdb_util import (
@@ -546,16 +546,27 @@ def main():
     print("#"*50)
     
     # Example: Multi-Intent Query
-    generate_and_execute_query(
+    final_combined_results = generate_and_execute_query(
         llm_client,
-        "What specific type of product or package is classified as OTC B to B Wall Unit, and what were the total sales for otc-retail across Q1 and Q2 combined?",
+        # "What specific type of product or package is classified as OTC B to B Wall Unit, and what were the total sales for otc-retail across Q1 and Q2 combined?",
         # "What is the maximum Span value recorded under the $40^\circ C$ / 75%RH condition, and which SprayTec Device ID produced this result?",
-        # "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
+        "List the volumes for Canada Kit for every month (Jan through Jun) to identify when activity began.",
         all_parquet_files,
         global_catalog_string,  # For LLM display
         global_catalog_dict,    # For programmatic access
         config,
         enable_debug=False
+    )
+    
+    print("\n" + "#"*80)
+    print("### GENERATING INSIGHTS SUMMARY ###")
+    print("#"*80)
+    
+    # Option 1: Quick summary (prints and optionally saves)
+    summary = generate_simple_summary(
+        results=final_combined_results,
+        llm_client=llm_client,
+        deployment_name=config.azure_openai.llm_deployment_name
     )
     print("\n--- Execution Complete ---")
 

@@ -7,7 +7,7 @@ import sys
 from azure.storage.blob import BlobServiceClient 
 import atexit 
 import time
-import threading # <-- ADDED: Import threading for concurrency control
+import threading 
 
 # Vector Database Ingestion - Using ChromaDB (Switch to vector_ingestion_util for MongoDB)
 try:
@@ -18,15 +18,13 @@ except ImportError:
         print(f"[WARNING] Using internal fallback ingestion for {file_path}.")
         return True
 
-# --- NEW: Global variable to store the persistent connection ---
+# Global variable to store the persistent connection
 PERSISTENT_DUCKDB_CONN = None
 
-# --- NEW: Global Lock for Connection Setup ---
+# Global Lock for Connection Setup 
 CONN_LOCK = threading.Lock()
-# -----------------------------------------------
-# 1. CORE DUCKDB UTILITIES (MODIFIED FOR PERSISTENCE)
-# -----------------------------------------------
 
+# 1. CORE DUCKDB UTILITIES
 def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
     """
     Initializes a NEW DuckDB connection, sets Azure Blob Storage credentials,
