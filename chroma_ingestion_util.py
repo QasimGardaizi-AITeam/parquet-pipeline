@@ -135,7 +135,7 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
 
     for idx, row in df.iterrows():
         row_values = [str(row[col]) if pd.notna(row[col]) else "NULL" for col in headers]
-        row_text = " | ".join([f"{col}:{val}" for col, val in zip(headers, row_values)])
+        row_text = " | ".join([f"{col}: {val}" for col, val in zip(headers, row_values)])
 
         row_index_label = df.index.name if df.index.name else 'index'
         row_text_with_index = f"[{row_index_label} {idx}] {row_text}"

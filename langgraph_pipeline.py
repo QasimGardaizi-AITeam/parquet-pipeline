@@ -296,7 +296,6 @@ Ensure the output strictly follows the JSON format.
 
 Example Output: {{"intent": "SEMANTIC_SEARCH"}} or {{"intent": "SQL_QUERY"}}
 """
-        
         response = llm_client.chat.completions.create(
             model=state["config"].azure_openai.llm_deployment_name,
             messages=[
@@ -306,7 +305,6 @@ Example Output: {{"intent": "SEMANTIC_SEARCH"}} or {{"intent": "SQL_QUERY"}}
             temperature=0.0,
             response_format={"type": "json_object"}
         )
-        
         json_output = json.loads(response.choices[0].message.content.strip())
         intent = json_output.get("intent", "SQL_QUERY").upper()
         
@@ -367,8 +365,6 @@ def perform_semantic_search(state: GraphState, llm_client: AzureOpenAI) -> Graph
             del df_sample
 
         print(f"[SUCCESS] Semantic context retrieved ({len(semantic_context)} chars)")
-        print("\nSemantic context preview:\n")
-        print(semantic_context)
         if state.get("enable_debug", False):
             print("\nSemantic context preview:")
             print(semantic_context[:300] + "..." if len(semantic_context) > 300 else semantic_context)
@@ -732,9 +728,8 @@ def run_rag_pipeline(
     Returns:
         Dictionary mapping queries to their result DataFrames (deserialized for output)
     """
-    print("\n" + "#"*80)
-    print("### LANGGRAPH RAG PIPELINE EXECUTION ###")
-    print("#"*80)
+
+    print("LANGGRAPH RAG PIPELINE EXECUTION")    
     print(f"\nUser Question: {user_question}")
     
     # Initialize LLM client OUTSIDE the state
@@ -787,9 +782,7 @@ def run_rag_pipeline(
         
         total_duration = time.time() - start_time
         
-        print("\n" + "#"*80)
-        print(f"### PIPELINE COMPLETE in {total_duration:.2f}s ###")
-        print("#"*80)
+        print(f"-> PIPELINE COMPLETE in {total_duration:.2f}s ")
         
         # Display summary
         if final_state.get("summary"):
@@ -813,7 +806,7 @@ def run_rag_pipeline(
 
 
 
-if __name__ == "__main__":
+def main():
     """
     Example usage of the LangGraph RAG pipeline.
     This demonstrates how to integrate with existing code.
@@ -876,9 +869,9 @@ if __name__ == "__main__":
     
     # Example queries
     queries = [
-        # "top 5 people with max loan?"
+        "Gregory Red?"
         # "give details of Connor Walts"
-        "What were the volumes for Canada Kit in each month from January to June?"
+        # "What were the volumes for Canada Kit in each month from January to June?"
     ]
     
     # Run pipeline for each query
@@ -897,3 +890,7 @@ if __name__ == "__main__":
         print("\n" + "-"*80)
     
     print("\n--- Pipeline Executed ---")
+    
+    
+if __name__ == "__main__":
+    main()
