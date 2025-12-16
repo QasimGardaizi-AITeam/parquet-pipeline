@@ -22,9 +22,7 @@ PERSISTENT_DUCKDB_CONN = None
 # Global Lock for Connection Setup 
 CONN_LOCK = threading.Lock()
 
-# ----------------------------------------------------------------------
 # 1. CORE UTILITIES AND COLUMN CLEANING
-# ----------------------------------------------------------------------
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -39,22 +37,11 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     seen_names = set()
     
     for col in df.columns:
-        # Step 1: Strip, replace newlines (common in Excel headers)
         cleaned_col = str(col).strip().replace('\n', '_').replace('\r', '_')
         
-        # Step 2: Replace special characters with spaces/underscores for better readability before final cleaning
-        # This simplifies the name while preserving some readability (e.g., 'Final Weight (g)' -> 'Final Weight g')
-        # Use regex substitution for more robust replacement of non-word characters later
-        
-        # Replace non-alphanumeric/non-underscore characters with a single space
         import re
-        # Convert to lowercase early for consistent handling
         cleaned_col = re.sub(r'[^\w\s]', ' ', cleaned_col).lower()
-        
-        # Step 3: Replace sequences of whitespace with a single underscore
         cleaned_col = re.sub(r'\s+', '_', cleaned_col)
-        
-        # Final name: clean up any leading/trailing underscores
         final_name = cleaned_col.strip('_')
         
         # Step 4: Handle duplicates (e.g., if 'Col A' and 'Col.A' both clean to 'col_a')
@@ -217,10 +204,7 @@ def execute_duckdb_query(query: str, config: Any) -> pd.DataFrame:
     except Exception as e:
         return pd.DataFrame({'Error': [str(e)]})
 
-
-# ----------------------------------------------------------------------
 # 2. INGESTION AND WRITING
-# ----------------------------------------------------------------------
 
 def convert_excel_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
     """
