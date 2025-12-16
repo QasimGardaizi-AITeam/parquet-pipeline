@@ -164,7 +164,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                             for index, row in schema_df.iterrows()]
             schema_string = f"TABLE SCHEMA (UNIONED):\n" + "\n".join(schema_lines)
             
-            df_sample = conn.execute(f"{query} LIMIT 20").fetchdf()
+            df_sample = conn.execute(f"{query} LIMIT 10").fetchdf()
             
         else:
             # --- JOIN MODE ---
@@ -192,7 +192,7 @@ def get_parquet_context(parquet_paths: List[str], use_union_by_name: bool = Fals
                     logical_name = os.path.splitext(os.path.basename(p_path.split('/')[-1]))[0]
                     alias = f"T{i+1}"
 
-                    sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 20").fetchdf()
+                    sample = conn.execute(f"SELECT * FROM read_parquet('{p_path}') LIMIT 10").fetchdf()
 
                     sample.insert(0, '__TABLE__', f"{alias}:{logical_name}")
                     sample_dfs.append(sample)

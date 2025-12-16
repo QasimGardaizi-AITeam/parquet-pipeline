@@ -24,10 +24,6 @@ def generate_simple_summary(
         Natural language summary as a string
     """
     
-    print("\n" + "-"*80)
-    print("       *** GENERATING SUMMARY ***")
-    print("="*80)
-    
     # Prepare all Q&A pairs for the LLM
     qa_pairs = []
     
@@ -78,13 +74,9 @@ Your summary:
         )
         
         summary = response.choices[0].message.content.strip()
-        
-        print("\n" + "="*80)
-        print("       *** SUMMARY ***")
-        print("="*80)
+
         print(f"\n{summary}\n")
-        print("="*80)
-        
+
         return summary
         
     except Exception as e:
