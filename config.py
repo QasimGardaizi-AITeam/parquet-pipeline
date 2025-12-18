@@ -6,8 +6,9 @@ All modules should import config from here instead of loading env vars directly.
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
 from enum import Enum
+from typing import List, Optional
+
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -16,19 +17,20 @@ load_dotenv()
 
 class VectorDBType(Enum):
     """Supported vector database types"""
+
     CHROMADB = "chromadb"
 
 
 @dataclass
 class AzureOpenAIConfig:
     """Azure OpenAI configuration for LLM and embeddings"""
-    
+
     # --- Non-default fields (Must be defined first) ---
     # LLM (GPT-4o) Configuration
     llm_endpoint: str
     llm_api_key: str
     llm_deployment_name: str
-    
+
     # Embedding Configuration
     embedding_endpoint: str
     embedding_api_key: str
@@ -52,17 +54,25 @@ class AzureOpenAIConfig:
         embedding_resource = os.getenv("OPENAI_EMBEDDING_RESOURCE")
         # NOTE: embedding_endpoint is set conditionally, but the dataclass definition requires it to be supplied
         # The logic here makes it None if the resource is missing, which is validated below.
-        embedding_endpoint = f"https://{embedding_resource}.openai.azure.com/" if embedding_resource else None
+        embedding_endpoint = (
+            f"https://{embedding_resource}.openai.azure.com/"
+            if embedding_resource
+            else None
+        )
         embedding_api_key = os.getenv("OPENAI_EMBEDDING_API_KEY")
         embedding_deployment_name = os.getenv("OPENAI_EMBEDDING_MODEL")
         embedding_api_version = os.getenv("OPENAI_EMBEDDING_VERSION", "2024-02-01")
 
         # Validate required fields
         if not all([llm_endpoint, llm_api_key, llm_deployment_name]):
-            raise ValueError("Missing required LLM configuration. Check your .env file.")
+            raise ValueError(
+                "Missing required LLM configuration. Check your .env file."
+            )
 
         if not all([embedding_endpoint, embedding_api_key, embedding_deployment_name]):
-            raise ValueError("Missing required embedding configuration. Check your .env file.")
+            raise ValueError(
+                "Missing required embedding configuration. Check your .env file."
+            )
 
         return cls(
             llm_endpoint=llm_endpoint,
@@ -72,18 +82,19 @@ class AzureOpenAIConfig:
             embedding_endpoint=embedding_endpoint,
             embedding_api_key=embedding_api_key,
             embedding_deployment_name=embedding_deployment_name,
-            embedding_api_version=embedding_api_version
+            embedding_api_version=embedding_api_version,
         )
 
 
 @dataclass
 class AzureStorageConfig:
     """Azure Blob Storage configuration"""
+
     # Non-default fields
     account_name: str
     container_name: str
     connection_string: str
-    
+
     # Default fields
     account_key: Optional[str] = None
     parquet_output_dir: str = "parquet_files/"
@@ -105,19 +116,22 @@ class AzureStorageConfig:
         account_key = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
 
         if not all([account_name, container_name, connection_string]):
-            raise ValueError("Missing required Azure Storage configuration. Check your .env file.")
+            raise ValueError(
+                "Missing required Azure Storage configuration. Check your .env file."
+            )
 
         return cls(
             account_name=account_name,
             container_name=container_name,
             connection_string=connection_string,
-            account_key=account_key
+            account_key=account_key,
         )
 
 
 @dataclass
 class ChromaDBConfig:
     """ChromaDB configuration"""
+
     # Default fields
     persist_directory: str = "./chroma_db"
     collection_prefix: str = "data_source"
@@ -130,17 +144,17 @@ class ChromaDBConfig:
         collection_prefix = os.getenv("CHROMA_COLLECTION_PREFIX", "data_source")
 
         return cls(
-            persist_directory=persist_directory,
-            collection_prefix=collection_prefix
+            persist_directory=persist_directory, collection_prefix=collection_prefix
         )
 
 
 @dataclass
 class VectorDBConfig:
     """Vector database configuration"""
+
     # Non-default fields
     db_type: VectorDBType
-    
+
     # Default fields
     chromadb: Optional[ChromaDBConfig] = None
 
@@ -158,6 +172,7 @@ class VectorDBConfig:
 @dataclass
 class AppConfig:
     """Main application configuration"""
+
     # Non-default fields (Sub-configurations)
     azure_openai: AzureOpenAIConfig
     azure_storage: AzureStorageConfig
@@ -165,14 +180,16 @@ class AppConfig:
 
     # Default fields
     # Application settings
-    input_file_paths: List[str] = field(default_factory=lambda: [
-        # '../sheets/file1.xlsx',
-        # '../sheets/file2.xlsx',
-        '../sheets/loan.xlsx',
-        '../sheets/Formulation_Test.xlsx',
-        '../sheets/Formulation2.xlsx',
-        '../sheets/PAID NARCAN Sample Data.xlsx'
-    ])
+    input_file_paths: List[str] = field(
+        default_factory=lambda: [
+            "../sheets/file1.xlsx",
+            "../sheets/file2.xlsx",
+            "../sheets/loan.xlsx",
+            "../sheets/Formulation_Test.xlsx",
+            "../sheets/Formulation2.xlsx",
+            "../sheets/PAID NARCAN Sample Data.xlsx",
+        ]
+    )
 
     # Performance settings
     enable_debug: bool = False
@@ -191,7 +208,7 @@ class AppConfig:
             return cls(
                 azure_openai=azure_openai,
                 azure_storage=azure_storage,
-                vector_db=vector_db
+                vector_db=vector_db,
             )
         except ValueError as e:
             print(f"[FATAL ERROR] Configuration failed: {e}")
@@ -220,7 +237,9 @@ class AppConfig:
 _config: Optional[AppConfig] = None
 
 
-def get_config(vector_db_type: VectorDBType = VectorDBType.CHROMADB, force_reload: bool = False) -> AppConfig:
+def get_config(
+    vector_db_type: VectorDBType = VectorDBType.CHROMADB, force_reload: bool = False
+) -> AppConfig:
     """
     Get the global configuration instance.
 
@@ -254,6 +273,7 @@ class Config:
     Legacy Config class for backwards compatibility.
     New code should use get_config() instead.
     """
+
     _app_config = None
 
     @classmethod
