@@ -9,6 +9,10 @@ import time
 from typing import Dict, List, Literal, Optional, TypedDict
 
 import pandas as pd
+from langgraph.graph import END, StateGraph
+from openai import AzureOpenAI
+from typing_extensions import TypedDict
+
 from chroma_retrieval_util import get_semantic_context_and_files
 from config import Config, VectorDBType, get_config
 from decomposition_util import decompose_multi_intent_query
@@ -20,11 +24,8 @@ from duckdb_util import (
     get_parquet_context,
     setup_duckdb_azure_connection,
 )
-from langgraph.graph import END, StateGraph
 from multi_file_util import identify_required_tables
-from openai import AzureOpenAI
 from summary_util import generate_simple_summary
-from typing_extensions import TypedDict
 
 
 def _df_to_json_result(df: pd.DataFrame) -> str:
@@ -918,7 +919,7 @@ def main():
     # Example queries
     queries = [
         # "Gregory Red?"
-        "give details of all Connors"
+        "maximum percentage of discount offered on product whose price changed due to Market Adjustment"
         # "What were the volumes for Canada Kit in each month from January to June?"
     ]
 
