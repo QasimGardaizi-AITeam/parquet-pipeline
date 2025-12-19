@@ -25,6 +25,7 @@ import os
 import re
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
@@ -674,6 +675,12 @@ def run_ingestion(
         )
 
         # 2. Submit Vector Ingestion (I/O-Bound job runs concurrently, handles L2/L1 parallelism internally)
+
+        ################################################################################
+        ################################################################################
+        ################## ENTRY POINT OF NOUMAN'S EMBEDDINGS PIPELINE##################
+        ################################################################################
+        ################################################################################
         vector_ingestion_future = executor.submit(ingest_to_vector_db, all_parquet_uris)
 
         # Wait for Catalog to finish
@@ -741,19 +748,23 @@ def run_ingestion(
 
 
 if __name__ == "__main__":
-    # Ensure this list is used consistently across runs
     INPUT_FILES = [
         "../sheets/MULTI.xlsx",
         "../sheets/loan.xlsx",
         "https://gist.githubusercontent.com/dsternlicht/74020ebfdd91a686d71e785a79b318d4/raw/d3104389ba98a8605f8e641871b9ce71eff73f7e/chartsninja-data-1.csv",
     ]
     try:
+        start = time.time()
         result_json = run_ingestion(
             input_files=INPUT_FILES,
             enable_llm_summaries=True,
             output_json_path="catalog_output.json",
         )
+        end = time.time()
         print(result_json)
+
+        elapsed_time = end - start
+        print(f"\n[INFO] Total Execution Time: {elapsed_time:.2f} seconds")
     except KeyboardInterrupt:
         print("\nProcess interrupted by user.")
         sys.exit(0)
