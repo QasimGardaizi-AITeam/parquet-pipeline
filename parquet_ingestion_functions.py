@@ -34,6 +34,7 @@ JSON with structure:
       "file_path": str (azure:// URI),
       "file_name": str,
       "column_count": int,
+      "row_count": int,
       "columns": [
         {"name": str, "type": str, "summary": str},
         ...
@@ -387,7 +388,12 @@ def build_global_catalog(
             }
             del schema_df
 
-            print(f"[INFO] Found {len(col_info)} columns")
+            # Get row count
+            row_count = conn.execute(
+                f"SELECT COUNT(*) as count FROM read_parquet('{path}')"
+            ).fetchone()[0]
+
+            print(f"[INFO] Found {len(col_info)} columns, {row_count:,} rows")
 
             column_summaries = {}
             if enable_llm_summaries and llm_client:
@@ -428,6 +434,7 @@ def build_global_catalog(
                 "parquet_path": path,
                 "columns": col_info,
                 "column_count": len(col_info),
+                "total_rows": row_count,  # ADDED
                 "file_name": os.path.basename(path),
             }
 
@@ -649,6 +656,7 @@ def run_ingestion(
             "file_path": table_info["parquet_path"],
             "file_name": table_info["file_name"],
             "column_count": table_info["column_count"],
+            "total_rows": table_info["total_rows"],  # ADDED
             "columns": [],
         }
 
