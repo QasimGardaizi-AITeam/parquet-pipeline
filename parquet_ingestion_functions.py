@@ -1,47 +1,22 @@
 """
 Tabular Data Ingestion Pipeline with LLM-Enhanced Catalog Generation
 
-Purpose:
-- Accepts local files or URLs of tabular data (Excel, CSV, TSV, JSON, Parquet)
-- IF (xlsx or xls) then downloads files from URLs in parallel (else direct conversion without downloading)
-- Converts all formats to compressed Parquet (ZSTD, 100K row chunks)
-- Uploads Parquet files to Azure Blob Storage
-- Generates LLM-enhanced catalog with column descriptions
-- Returns JSON catalog for downstream query processing
+DESIGN GOAL: MAXIMUM PARALLELISM ACROSS ALL LAYERS
+This pipeline is optimized for concurrent execution across four layers:
 
-Supported Formats:
-- Excel (.xlsx, .xls) - processes multiple sheets separately
-- CSV (.csv)
-- TSV (.tsv)
-- JSON (.json)
-- Parquet (.parquet) - uploads directly
+1. L4 (Phase 1): Concurrent conversion and upload of all input files.
+2. L3 (Phase 2): Concurrent cataloging of *each* Parquet file AND concurrent vector
+   ingestion of *all* Parquet files.
+3. L2 (Internal Vector Ingestion): Concurrent processing of all Parquet URIs within the
+   main Vector Ingestion job.
+4. L1 (Internal Vector Embedding): Concurrent embedding of text batches for maximum
+   Azure OpenAI throughput.
 
 Processing Flow:
-1. Download URLs in parallel (if URLs provided)
-2. Convert all files to Parquet in parallel
-3. Upload Parquet files to Azure Blob Storage
-4. Generate LLM summaries for all columns
-5. Return JSON catalog with file paths and column metadata
-
-Output Format:
-JSON with structure:
-{
-  "success": bool,
-  "total_files": int,
-  "failed_files": [],
-  "tables": [
-    {
-      "file_path": str (azure:// URI),
-      "file_name": str,
-      "column_count": int,
-      "row_count": int,
-      "columns": [
-        {"name": str, "type": str, "summary": str},
-        ...
-      ]
-    }
-  ]
-}
+1. [Parallel] Phase 1: Download (if needed), Convert to Parquet, and Upload to Azure Blob.
+2. [Concurrent] Phase 2: Build LLM-enhanced Catalog AND run Vector Ingestion concurrently.
+   * Both jobs now utilize internal parallelism to process files simultaneously.
+3. [Sequential] Phase 3: Collect results and generate final JSON output.
 """
 
 import atexit
@@ -51,7 +26,7 @@ import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import duckdb
@@ -61,15 +36,20 @@ from azure.storage.blob import BlobServiceClient
 
 from config import Config, VectorDBType, get_config
 
+# --- Core Dependency Import: Vector Ingestion ---
 try:
-    from chroma_ingestion_util import ingest_to_chroma_db as ingest_to_vector_db
+    from chroma_ingestion_util import ingest_to_vector_db
 except ImportError:
-
-    def ingest_to_vector_db(file_path, sheet_name=None, collection_prefix=None):
+    # Placeholder for developer who is working on it
+    def ingest_to_vector_db(file_paths: List[str], collection_prefix=None) -> bool:
+        print(
+            f"[PLACEHOLDER] Vector ingestion for {len(file_paths)} files would run here."
+        )
         return True
 
 
-PERSISTENT_DUCKDB_CONN = None
+# Global/Persistent Connection is still used for sequential operations, but avoided in parallel workers.
+PERSISTENT_DUCKDB_CONN: Union[duckdb.DuckDBPyConnection, None] = None
 CONN_LOCK = threading.Lock()
 
 
@@ -84,6 +64,7 @@ atexit.register(close_persistent_duckdb_connection)
 
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    """Standardizes column names to be lowercase and snake_case."""
     new_cols = {}
     seen = set()
     for col in df.columns:
@@ -101,6 +82,25 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
+    """
+    Initializes and returns a DuckDB connection with Azure credentials.
+    This function can be called to get a local, transient connection for workers,
+    or used to set up the global persistent connection.
+    """
+    conn = duckdb.connect()
+    try:
+        conn.execute("INSTALL azure;")
+        conn.execute("LOAD azure;")
+        escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
+        conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+        return conn
+    except Exception as e:
+        conn.close()
+        raise Exception(f"Failed to set up DuckDB Azure connection: {e}")
+
+
+def get_global_duckdb_connection(config: Any) -> duckdb.DuckDBPyConnection:
+    """Gets or sets the persistent global connection (used primarily for setup/sequential)."""
     global PERSISTENT_DUCKDB_CONN
     if PERSISTENT_DUCKDB_CONN:
         return PERSISTENT_DUCKDB_CONN
@@ -108,16 +108,12 @@ def setup_duckdb_azure_connection(config: Any) -> duckdb.DuckDBPyConnection:
     with CONN_LOCK:
         if PERSISTENT_DUCKDB_CONN:
             return PERSISTENT_DUCKDB_CONN
-        conn = duckdb.connect()
-        conn.execute("INSTALL azure;")
-        conn.execute("LOAD azure;")
-        escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
-        conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
-        PERSISTENT_DUCKDB_CONN = conn
-        return conn
+        PERSISTENT_DUCKDB_CONN = setup_duckdb_azure_connection(config)
+        return PERSISTENT_DUCKDB_CONN
 
 
 def upload_file_to_azure(local_path: str, remote_file_name: str, config: Any) -> str:
+    """Uploads a local file to Azure Blob Storage and returns the Azure URI."""
     client = BlobServiceClient.from_connection_string(
         config.azure_storage.connection_string
     )
@@ -160,30 +156,33 @@ def detect_file_format(file_path: str) -> str:
         return "unknown"
 
 
+# --- Conversion Functions (Accepts URL or Local Path) ---
+
+
 def convert_csv_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
-    """Convert CSV to Parquet"""
+    """Convert CSV (local or remote URL) to Parquet and upload."""
     temp_dir = "/tmp/parquet_cache"
     os.makedirs(temp_dir, exist_ok=True)
 
-    base_name = re.sub(r"[^\w]", "_", os.path.splitext(os.path.basename(input_path))[0])
+    base_name = re.sub(
+        r"[^\w]", "_", os.path.splitext(os.path.basename(input_path.split("/")[-1]))[0]
+    )
     parquet_file = os.path.join(temp_dir, f"{base_name}.parquet")
 
+    conn = None
     try:
+        # pandas.read_csv handles remote HTTP/S paths directly
         df = pd.read_csv(input_path)
         df = clean_column_names(df)
 
-        conn = duckdb.connect()
-        conn.execute("INSTALL azure;")
-        conn.execute("LOAD azure;")
-        escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
-        conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+        # CRITICAL FIX: Use local, transient connection
+        conn = setup_duckdb_azure_connection(config)
 
         conn.register("temp_df", df)
         conn.execute(
             f"COPY temp_df TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
         )
         conn.unregister("temp_df")
-        conn.close()
         del df
 
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
@@ -194,32 +193,34 @@ def convert_csv_to_parquet(input_path: str, output_dir: str, config: Any) -> Lis
     except Exception as e:
         print(f"[ERROR] Failed to convert CSV: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
 
 
 def convert_tsv_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
-    """Convert TSV to Parquet"""
+    """Convert TSV (local or remote URL) to Parquet and upload."""
     temp_dir = "/tmp/parquet_cache"
     os.makedirs(temp_dir, exist_ok=True)
 
-    base_name = re.sub(r"[^\w]", "_", os.path.splitext(os.path.basename(input_path))[0])
+    base_name = re.sub(
+        r"[^\w]", "_", os.path.splitext(os.path.basename(input_path.split("/")[-1]))[0]
+    )
     parquet_file = os.path.join(temp_dir, f"{base_name}.parquet")
 
+    conn = None
     try:
         df = pd.read_csv(input_path, sep="\t")
         df = clean_column_names(df)
 
-        conn = duckdb.connect()
-        conn.execute("INSTALL azure;")
-        conn.execute("LOAD azure;")
-        escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
-        conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+        # CRITICAL FIX: Use local, transient connection
+        conn = setup_duckdb_azure_connection(config)
 
         conn.register("temp_df", df)
         conn.execute(
             f"COPY temp_df TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
         )
         conn.unregister("temp_df")
-        conn.close()
         del df
 
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
@@ -230,32 +231,34 @@ def convert_tsv_to_parquet(input_path: str, output_dir: str, config: Any) -> Lis
     except Exception as e:
         print(f"[ERROR] Failed to convert TSV: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
 
 
 def convert_json_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
-    """Convert JSON to Parquet"""
+    """Convert JSON (local or remote URL) to Parquet and upload."""
     temp_dir = "/tmp/parquet_cache"
     os.makedirs(temp_dir, exist_ok=True)
 
-    base_name = re.sub(r"[^\w]", "_", os.path.splitext(os.path.basename(input_path))[0])
+    base_name = re.sub(
+        r"[^\w]", "_", os.path.splitext(os.path.basename(input_path.split("/")[-1]))[0]
+    )
     parquet_file = os.path.join(temp_dir, f"{base_name}.parquet")
 
+    conn = None
     try:
         df = pd.read_json(input_path)
         df = clean_column_names(df)
 
-        conn = duckdb.connect()
-        conn.execute("INSTALL azure;")
-        conn.execute("LOAD azure;")
-        escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
-        conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+        # CRITICAL FIX: Use local, transient connection
+        conn = setup_duckdb_azure_connection(config)
 
         conn.register("temp_df", df)
         conn.execute(
             f"COPY temp_df TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
         )
         conn.unregister("temp_df")
-        conn.close()
         del df
 
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
@@ -266,10 +269,13 @@ def convert_json_to_parquet(input_path: str, output_dir: str, config: Any) -> Li
     except Exception as e:
         print(f"[ERROR] Failed to convert JSON: {e}")
         return []
+    finally:
+        if conn:
+            conn.close()
 
 
 def upload_existing_parquet(input_path: str, config: Any) -> List[str]:
-    """Upload existing Parquet file to Azure"""
+    """Upload existing local Parquet file to Azure."""
     base_name = os.path.basename(input_path)
 
     try:
@@ -281,10 +287,8 @@ def upload_existing_parquet(input_path: str, config: Any) -> List[str]:
 
 
 def convert_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
-    """Convert ANY tabular format to Parquet"""
+    """Routes file conversion based on format."""
     file_format = detect_file_format(input_path)
-
-    print(f"[INFO] Detected format: {file_format}")
 
     if file_format == "excel":
         return convert_excel_to_parquet(input_path, output_dir, config)
@@ -304,23 +308,29 @@ def convert_to_parquet(input_path: str, output_dir: str, config: Any) -> List[st
 def convert_excel_to_parquet(
     input_path: str, output_dir: str, config: Any
 ) -> List[str]:
+    """Converts Excel file (all sheets) to separate Parquet files and uploads them."""
     temp_dir = "/tmp/parquet_cache"
     os.makedirs(temp_dir, exist_ok=True)
     uris = []
 
+    conn = None
     try:
+        # pandas.read_excel requires a local file or buffer, hence the earlier download step for URLs
         sheets = pd.read_excel(input_path, sheet_name=None, engine="openpyxl")
     except Exception as e:
         print(f"[ERROR] Failed to read Excel {input_path}: {e}")
         return uris
 
-    base_name = re.sub(r"[^\w]", "_", os.path.splitext(os.path.basename(input_path))[0])
+    base_name = re.sub(
+        r"[^\w]", "_", os.path.splitext(os.path.basename(input_path.split("/")[-1]))[0]
+    )
 
-    conn = duckdb.connect()
-    conn.execute("INSTALL azure;")
-    conn.execute("LOAD azure;")
-    escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
-    conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+    # CRITICAL FIX: Use local, transient connection for the multi-sheet process
+    try:
+        conn = setup_duckdb_azure_connection(config)
+    except Exception as e:
+        print(f"[ERROR] Excel conversion failed to setup DuckDB: {e}")
+        return []
 
     for sheet_name, df in sheets.items():
         if df.empty or df.shape[1] == 0:
@@ -347,104 +357,59 @@ def convert_excel_to_parquet(
         except Exception as e:
             print(f"[ERROR] Failed sheet {sheet_name}: {e}")
 
-    conn.close()
+    if conn:
+        conn.close()
     return uris
 
 
-def build_global_catalog(
-    parquet_paths: List[str], config: Any, enable_llm_summaries: bool = True
-) -> Dict[str, Dict[str, Any]]:
-    from openai import AzureOpenAI
+# --- PHASE 1 Parallel Worker (L4 Parallelism) ---
+def process_and_convert_file(
+    input_file_path: str, temp_dir: str, config: Any
+) -> Tuple[List[str], Optional[str]]:
+    """
+    Worker function executed in parallel for each input file.
+    """
+    local_path = None
+    original_path = input_file_path
 
-    conn = setup_duckdb_azure_connection(config)
-
-    llm_client = None
-    if enable_llm_summaries:
-        try:
-            llm_client = AzureOpenAI(
-                api_key=config.azure_openai.llm_api_key,
-                azure_endpoint=config.azure_openai.llm_endpoint,
-                api_version=config.azure_openai.llm_api_version,
-            )
-            print("[INFO] LLM client initialized successfully")
-        except Exception as e:
-            print(f"[WARNING] Failed to initialize LLM client: {e}")
-            enable_llm_summaries = False
-
-    catalog_dict = {}
-
-    for idx, path in enumerate(parquet_paths, 1):
+    # NOTE: This worker is clean. It calls the conversion functions which now handle
+    # their own transient DuckDB connections internally.
+    try:
         print(
-            f"\n[INFO] Processing file {idx}/{len(parquet_paths)}: {os.path.basename(path)}"
+            f"[INFO] Starting parallel processing for: {os.path.basename(original_path)}"
         )
 
-        try:
-            schema_df = conn.execute(
-                f"DESCRIBE (SELECT * FROM read_parquet('{path}'))"
-            ).fetchdf()
-            col_info = {
-                row["column_name"]: row["column_type"]
-                for _, row in schema_df.iterrows()
-            }
-            del schema_df
+        path_to_convert = original_path
+        is_url = original_path.startswith("http://") or original_path.startswith(
+            "https://"
+        )
 
-            # Get row count
-            row_count = conn.execute(
-                f"SELECT COUNT(*) as count FROM read_parquet('{path}')"
-            ).fetchone()[0]
+        if is_url:
+            ext = os.path.splitext(urlparse(input_file_path).path)[1].lower()
 
-            print(f"[INFO] Found {len(col_info)} columns, {row_count:,} rows")
+            if ext in [".xlsx", ".xls"]:
+                filename = os.path.basename(urlparse(input_file_path).path)
+                local_path = os.path.join(temp_dir, filename)
+                download_file_from_url(input_file_path, local_path)
+                path_to_convert = local_path
+        else:
+            if not os.path.exists(input_file_path):
+                raise FileNotFoundError(f"Local file not found: {input_file_path}")
 
-            column_summaries = {}
-            if enable_llm_summaries and llm_client:
-                try:
-                    print(
-                        f"[INFO] Generating summaries for all {len(col_info)} columns..."
-                    )
+        uris = convert_to_parquet(
+            path_to_convert, config.azure_storage.parquet_output_dir, config
+        )
 
-                    sample_df = conn.execute(
-                        f"SELECT * FROM read_parquet('{path}') LIMIT 5"
-                    ).fetchdf()
+        if local_path and os.path.exists(local_path):
+            os.remove(local_path)
 
-                    print(f"[INFO] Sample data shape: {sample_df.shape}")
+        return uris, None
 
-                    column_summaries = generate_column_summaries(
-                        columns=col_info,
-                        sample_data=sample_df,
-                        llm_client=llm_client,
-                        deployment_name=config.azure_openai.llm_deployment_name,
-                    )
-
-                    print(f"[SUCCESS] Generated {len(column_summaries)} summaries")
-
-                    if len(column_summaries) < len(col_info):
-                        print(
-                            f"[WARNING] Only {len(column_summaries)}/{len(col_info)} columns got summaries"
-                        )
-
-                    del sample_df
-
-                except Exception as e:
-                    print(f"[ERROR] Failed to generate summaries: {e}")
-                    import traceback
-
-                    traceback.print_exc()
-
-            catalog_dict[path] = {
-                "parquet_path": path,
-                "columns": col_info,
-                "column_count": len(col_info),
-                "total_rows": row_count,  # ADDED
-                "file_name": os.path.basename(path),
-            }
-
-            if column_summaries:
-                catalog_dict[path]["column_summaries"] = column_summaries
-
-        except Exception as e:
-            print(f"[ERROR] Failed to catalog {path}: {e}")
-
-    return catalog_dict
+    except Exception as e:
+        print(f"[ERROR] Full processing failed for {original_path}: {e}")
+        if local_path and os.path.exists(local_path):
+            os.remove(local_path)
+        return [], original_path
 
 
 def generate_column_summaries(
@@ -453,9 +418,7 @@ def generate_column_summaries(
     llm_client: Any,
     deployment_name: str,
 ) -> Dict[str, str]:
-
-    print(f"[INFO] Preparing data for {len(columns)} columns")
-
+    """Calls the LLM to generate descriptive summaries for all columns based on sample data."""
     if len(sample_data) > 5:
         sample_text = sample_data.head(5).to_markdown(index=False, tablefmt="plain")
     else:
@@ -480,13 +443,7 @@ Sample data (5 rows):
 Respond with JSON containing ALL {len(columns)} columns:
 {{"column": "brief description", ...}}
 
-Example format:
-{{"id": "Unique customer identifiers", "name": "Full customer names", "age": "Customer ages in years"}}
-
 IMPORTANT: Include ALL {len(columns)} columns in your response."""
-
-    print(f"[INFO] Sending request to LLM for {len(columns)} columns")
-    print(f"[INFO] Prompt length: {len(prompt)} chars")
 
     try:
         response = llm_client.chat.completions.create(
@@ -498,57 +455,144 @@ IMPORTANT: Include ALL {len(columns)} columns in your response."""
         )
 
         summaries = json.loads(response.choices[0].message.content.strip())
-
-        print(f"[INFO] LLM returned {len(summaries)} summaries")
-
-        if len(summaries) < len(columns):
-            missing = set(columns.keys()) - set(summaries.keys())
-            print(f"[WARNING] Missing summaries for: {list(missing)[:5]}...")
-
         return summaries
 
     except Exception as e:
         print(f"[ERROR] LLM call failed: {e}")
-        import traceback
-
-        traceback.print_exc()
         return {}
 
 
-def get_parquet_context(
-    parquet_paths: List[str],
-    use_union_by_name: bool,
-    all_parquet_glob_pattern: str,
-    config: Any,
-) -> Tuple[str, pd.DataFrame]:
-    conn = setup_duckdb_azure_connection(config)
-    schema_lines = []
-    sample_dfs = []
+# --- PHASE 2 Parallel Worker (L3 Parallelism) ---
 
-    for path in parquet_paths:
+
+def process_single_parquet_for_catalog(
+    path: str, llm_client: Any, config: Any, enable_llm_summaries: bool
+) -> Tuple[Optional[str], Union[Dict[str, Any], None]]:
+    """
+    Worker function to process a single Parquet URI for the catalog.
+    CRITICAL FIX: Creates and closes its own DuckDB connection.
+    Returns: (parquet_path, table_catalog_dict)
+    """
+    conn = None
+    try:
+        # CRITICAL FIX: Use local, transient connection
+        conn = setup_duckdb_azure_connection(config)
+
+        # Get schema
+        schema_df = conn.execute(
+            f"DESCRIBE (SELECT * FROM read_parquet('{path}'))"
+        ).fetchdf()
+        col_info = {
+            row["column_name"]: row["column_type"] for _, row in schema_df.iterrows()
+        }
+        del schema_df
+
+        # Get row count
+        row_count = conn.execute(
+            f"SELECT COUNT(*) as count FROM read_parquet('{path}')"
+        ).fetchone()[0]
+
+        column_summaries = {}
+        if enable_llm_summaries and llm_client:
+            # LLM summarization logic
+            sample_df = conn.execute(
+                f"SELECT * FROM read_parquet('{path}') LIMIT 5"
+            ).fetchdf()
+
+            column_summaries = generate_column_summaries(
+                columns=col_info,
+                sample_data=sample_df,
+                llm_client=llm_client,
+                deployment_name=config.azure_openai.llm_deployment_name,
+            )
+            del sample_df
+
+        # Store in catalog structure
+        table_info = {
+            "parquet_path": path,
+            "columns": col_info,
+            "column_count": len(col_info),
+            "total_rows": row_count,
+            "file_name": os.path.basename(path),
+        }
+
+        if column_summaries:
+            table_info["column_summaries"] = column_summaries
+
+        print(
+            f"[SUCCESS] Cataloged {os.path.basename(path)} ({row_count:,} rows) in parallel."
+        )
+        return path, table_info
+
+    except Exception as e:
+        print(f"[ERROR] Failed to catalog {os.path.basename(path)} in parallel: {e}")
+        return path, None
+    finally:
+        if conn:
+            conn.close()
+
+
+def build_global_catalog(
+    parquet_paths: List[str], config: Any, enable_llm_summaries: bool = True
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Generates a catalog for all Parquet files concurrently using a ThreadPoolExecutor.
+    """
+    from openai import AzureOpenAI
+
+    catalog_dict = {}
+
+    llm_client = None
+    if enable_llm_summaries:
         try:
-            df = conn.execute(
-                f"SELECT * FROM read_parquet('{path}') LIMIT 10"
-            ).fetchdf()
-            df.insert(0, "__TABLE__", os.path.splitext(os.path.basename(path))[0])
-            sample_dfs.append(df)
+            llm_client = AzureOpenAI(
+                api_key=config.azure_openai.llm_api_key,
+                azure_endpoint=config.azure_openai.llm_endpoint,
+                api_version=config.azure_openai.llm_api_version,
+            )
+            print("[INFO] LLM client initialized successfully for summarization.")
+        except Exception as e:
+            print(
+                f"[WARNING] Failed to initialize LLM client: {e}. Disabling LLM summaries."
+            )
+            enable_llm_summaries = False
 
-            schema_df = conn.execute(
-                f"DESCRIBE (SELECT * FROM read_parquet('{path}'))"
-            ).fetchdf()
-            schema_lines.append(f"\nTable: {os.path.basename(path)}")
-            for _, row in schema_df.iterrows():
-                schema_lines.append(f"  {row['column_name']} ({row['column_type']})")
-        except Exception:
-            pass
+    # Note: DuckDB connections are now managed inside the worker
 
-    combined_schema = "\n".join(schema_lines)
-    combined_sample = (
-        pd.concat(sample_dfs, ignore_index=True, sort=False)
-        if sample_dfs
-        else pd.DataFrame()
+    # Internal worker pool for cataloging files (L3 Parallelism)
+    MAX_CATALOG_WORKERS = 4
+
+    print(
+        f"\n[INFO] Starting concurrent cataloging for {len(parquet_paths)} URIs using {MAX_CATALOG_WORKERS} workers."
     )
-    return combined_schema, combined_sample
+
+    with ThreadPoolExecutor(max_workers=MAX_CATALOG_WORKERS) as executor:
+        future_to_path = {
+            executor.submit(
+                process_single_parquet_for_catalog,
+                path,
+                llm_client,
+                config,
+                enable_llm_summaries,
+            ): path
+            for path in parquet_paths
+        }
+
+        for future in as_completed(future_to_path):
+            path = future_to_path[future]
+            try:
+                _, table_info = future.result()
+                if table_info:
+                    catalog_dict[path] = table_info
+            except Exception as e:
+                print(
+                    f"[ERROR] Failed to retrieve result for {os.path.basename(path)}: {e}"
+                )
+
+    print(
+        f"\n[SUCCESS] Concurrent cataloging complete. Cataloged {len(catalog_dict)} tables."
+    )
+    return catalog_dict
 
 
 def run_ingestion(
@@ -556,10 +600,12 @@ def run_ingestion(
     enable_llm_summaries: bool = True,
     output_json_path: str = None,
 ) -> str:
+    """The main orchestration function for the ingestion pipeline."""
     config = get_config(VectorDBType.CHROMADB)
 
     try:
-        setup_duckdb_azure_connection(config)
+        # Get the global connection once, mainly to register atexit cleanup
+        get_global_duckdb_connection(config)
         atexit.register(close_persistent_duckdb_connection)
     except Exception as e:
         print(f"[FATAL] Failed to setup DuckDB: {e}")
@@ -568,81 +614,91 @@ def run_ingestion(
     temp_dir = "/tmp/downloaded_files"
     os.makedirs(temp_dir, exist_ok=True)
 
-    # STEP 1: Download all URLs in parallel
-    print(f"[INFO] Processing {len(input_files)} input files...")
-    processed_files = []
+    # --- PHASE 1: Full File Processing (Download, Convert, Upload) in Parallel ---
+    print(
+        f"\n--- PHASE 1: Processing {len(input_files)} Files (Download, Convert, Upload) in Parallel ---"
+    )
 
-    def process_input_file(file_path):
-        if file_path.startswith("http://") or file_path.startswith("https://"):
-            # Check format from URL
-            ext = os.path.splitext(urlparse(file_path).path)[1].lower()
-
-            if ext in [".xlsx", ".xls"]:
-                # Excel: Must download (ZIP format)
-                filename = os.path.basename(urlparse(file_path).path)
-                local_path = os.path.join(temp_dir, filename)
-                try:
-                    download_file_from_url(file_path, local_path)
-                    return local_path
-                except Exception as e:
-                    print(f"[ERROR] Failed to download {file_path}: {e}")
-                    return None
-            else:
-                # CSV/TSV/JSON/Parquet: Use URL directly (no download needed)
-                print(f"[INFO] Using URL directly: {os.path.basename(file_path)}")
-                return file_path
-        else:
-            # Local file
-            if os.path.exists(file_path):
-                return file_path
-            else:
-                print(f"[WARNING] File not found: {file_path}")
-                return None
-
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        results = executor.map(process_input_file, input_files)
-        processed_files = [f for f in results if f is not None]
-
-    if not processed_files:
-        print("[ERROR] No valid input files found")
-        sys.exit(1)
-
-    print(f"[INFO] Successfully prepared {len(processed_files)} files for conversion")
-
-    # STEP 2: Convert all files to Parquet in parallel
     all_parquet_uris = []
     failed_files = []
 
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    # MAX_CONVERSION_WORKERS drives L4 parallelism
+    MAX_CONVERSION_WORKERS = 4
+    with ThreadPoolExecutor(max_workers=MAX_CONVERSION_WORKERS) as executor:
         future_to_file = {
             executor.submit(
-                convert_to_parquet,
+                process_and_convert_file,
                 file_path,
-                config.azure_storage.parquet_output_dir,
+                temp_dir,
                 config,
             ): file_path
-            for file_path in processed_files
+            for file_path in input_files
         }
 
         for future in as_completed(future_to_file):
-            file_path = future_to_file[future]
+            original_path = future_to_file[future]
             try:
-                uris = future.result()
+                uris, failed_path = future.result()
                 if uris:
                     all_parquet_uris.extend(uris)
-                    print(f"[SUCCESS] Converted {os.path.basename(file_path)}")
-                else:
-                    failed_files.append(file_path)
+                    print(
+                        f"[SUCCESS] Processed {os.path.basename(original_path)} -> {len(uris)} Parquet URI(s)"
+                    )
+                elif failed_path:
+                    failed_files.append(failed_path)
             except Exception as e:
-                print(f"[ERROR] Failed {os.path.basename(file_path)}: {e}")
-                failed_files.append(file_path)
+                print(
+                    f"[ERROR] Unexpected failure during processing of {os.path.basename(original_path)}: {e}"
+                )
+                failed_files.append(original_path)
 
     if not all_parquet_uris:
-        print("[ERROR] No Parquet files created")
-        sys.exit(1)
+        print("[ERROR] No Parquet files successfully created.")
+        if not failed_files:
+            sys.exit(1)
 
-    print(f"\n[INFO] Building catalog for {len(all_parquet_uris)} Parquet files")
-    catalog_dict = build_global_catalog(all_parquet_uris, config, enable_llm_summaries)
+    print(f"[SUCCESS] Converted and uploaded {len(all_parquet_uris)} Parquet files.")
+
+    # --- PHASE 2: Parallel Catalog Building & Vector Ingestion ---
+    print(f"\n--- PHASE 2: Starting Parallel Catalog and Vector Ingestion ---")
+
+    # MAX_POST_PROCESSING_WORKERS drives L3 parallelism (between the two major jobs)
+    MAX_POST_PROCESSING_WORKERS = 5
+    catalog_dict = {}
+
+    with ThreadPoolExecutor(max_workers=MAX_POST_PROCESSING_WORKERS) as executor:
+
+        # 1. Submit Catalog Building (LLM-Bound job runs concurrently, now internally parallel)
+        catalog_future = executor.submit(
+            build_global_catalog, all_parquet_uris, config, enable_llm_summaries
+        )
+
+        # 2. Submit Vector Ingestion (I/O-Bound job runs concurrently, handles L2/L1 parallelism internally)
+        vector_ingestion_future = executor.submit(ingest_to_vector_db, all_parquet_uris)
+
+        # Wait for Catalog to finish
+        try:
+            catalog_dict = catalog_future.result()
+            print(f"[SUCCESS] Global catalog built for {len(catalog_dict)} tables.")
+        except Exception as e:
+            print(f"[FATAL ERROR] Catalog building failed: {e}")
+            catalog_dict = {}
+
+        # Wait for the single Vector Ingestion task to finish (which wrapped all file ingestions)
+        vector_ingestion_success = False
+        try:
+            vector_ingestion_success = vector_ingestion_future.result()
+        except Exception as e:
+            print(f"[ERROR] Vector ingestion job failed: {e}")
+            vector_ingestion_success = False
+
+        if vector_ingestion_success:
+            print("[SUCCESS] All vector ingestion tasks completed.")
+        else:
+            print("[WARNING] One or more vector ingestion tasks reported failure.")
+
+    # --- PHASE 3: Final JSON Output Generation ---
+    print(f"\n--- PHASE 3: Generating Final JSON Output ---")
 
     json_output = {
         "success": True,
@@ -651,12 +707,13 @@ def run_ingestion(
         "tables": [],
     }
 
+    # Structure final output from catalog_dict
     for table_info in catalog_dict.values():
         table_block = {
             "file_path": table_info["parquet_path"],
             "file_name": table_info["file_name"],
             "column_count": table_info["column_count"],
-            "total_rows": table_info["total_rows"],  # ADDED
+            "total_rows": table_info["total_rows"],
             "columns": [],
         }
 
@@ -671,6 +728,9 @@ def run_ingestion(
 
         json_output["tables"].append(table_block)
 
+    if not catalog_dict and failed_files:
+        json_output["success"] = False
+
     json_string = json.dumps(json_output, indent=2, ensure_ascii=False)
 
     if output_json_path:
@@ -681,19 +741,22 @@ def run_ingestion(
 
 
 if __name__ == "__main__":
+    # Ensure this list is used consistently across runs
+    INPUT_FILES = [
+        "../sheets/MULTI.xlsx",
+        "../sheets/loan.xlsx",
+        "https://gist.githubusercontent.com/dsternlicht/74020ebfdd91a686d71e785a79b318d4/raw/d3104389ba98a8605f8e641871b9ce71eff73f7e/chartsninja-data-1.csv",
+    ]
     try:
         result_json = run_ingestion(
-            input_files=[
-                "../sheets/MULTI.xlsx",
-                "../sheets/loan.xlsx",
-                "https://gist.githubusercontent.com/dsternlicht/74020ebfdd91a686d71e785a79b318d4/raw/d3104389ba98a8605f8e641871b9ce71eff73f7e/chartsninja-data-1.csv",
-            ],
+            input_files=INPUT_FILES,
             enable_llm_summaries=True,
             output_json_path="catalog_output.json",
         )
         print(result_json)
     except KeyboardInterrupt:
+        print("\nProcess interrupted by user.")
         sys.exit(0)
     except Exception as e:
-        print(f"[FATAL] {e}")
+        print(f"[FATAL] An unhandled exception occurred: {e}")
         sys.exit(1)
