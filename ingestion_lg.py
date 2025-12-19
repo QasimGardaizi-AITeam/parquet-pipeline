@@ -27,7 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from config import VectorDBType, get_config
 
 try:
-    from chroma_ingestion_util_tester import ingest_to_vector_db
+    from chroma_ingestion_util import ingest_to_vector_db
 except ImportError:
 
     def ingest_to_vector_db(file_paths: List[str], collection_prefix=None) -> bool:
@@ -37,9 +37,7 @@ except ImportError:
         return True
 
 
-# ============================================================================
 # STATE DEFINITION
-# ============================================================================
 
 
 class PipelineState(TypedDict):
@@ -69,9 +67,7 @@ class PipelineState(TypedDict):
     file_ids: Optional[Dict[str, str]]
 
 
-# ============================================================================
 # UTILITY FUNCTIONS
-# ============================================================================
 
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -145,13 +141,13 @@ def detect_file_format(file_path: str) -> str:
     return format_map.get(ext, "unknown")
 
 
-# ============================================================================
 # CONVERSION FUNCTIONS (with transient DuckDB connections)
-# ============================================================================
 
 
 def convert_csv_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
-    """Convert CSV to Parquet and upload."""
+    """
+    Convert CSV to Parquet and upload using chunking (streaming) to minimize RAM usage.
+    """
     temp_dir = "/tmp/parquet_cache"
     os.makedirs(temp_dir, exist_ok=True)
 
@@ -160,24 +156,53 @@ def convert_csv_to_parquet(input_path: str, output_dir: str, config: Any) -> Lis
     )
     parquet_file = os.path.join(temp_dir, f"{base_name}.parquet")
 
+    # Define the chunk size to limit the memory footprint
+    CHUNK_SIZE = 100000
+
     conn = None
     try:
-        df = pd.read_csv(input_path)
-        df = clean_column_names(df)
-
         conn = setup_duckdb_azure_connection(config)
-        conn.register("temp_df", df)
-        conn.execute(
-            f"COPY temp_df TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
-        )
-        conn.unregister("temp_df")
-        del df
+        chunk_iterator = pd.read_csv(input_path, chunksize=CHUNK_SIZE)
+        is_first_chunk = True
 
+        # Iterate over chunks, process, and append to the Parquet file
+        for i, df_chunk in enumerate(chunk_iterator):
+
+            # 1. Clean column names only on the first chunk
+            if is_first_chunk:
+                df_chunk = clean_column_names(df_chunk)
+                columns = df_chunk.columns
+                is_first_chunk = False
+            else:
+                # Apply consistent schema/column names to subsequent chunks
+                df_chunk.columns = columns
+
+            # 2. Register the chunk and write/append using DuckDB
+            conn.register("temp_chunk", df_chunk)
+
+            if i == 0:
+                # First chunk CREATES the Parquet file (or overwrites)
+                conn.execute(
+                    f"COPY temp_chunk TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
+                )
+            else:
+                # Subsequent chunks INSERT/APPEND to the existing Parquet file
+                conn.execute(f"INSERT INTO '{parquet_file}' SELECT * FROM temp_chunk;")
+
+            conn.unregister("temp_chunk")
+            del df_chunk  # Explicitly free the chunk memory
+
+        if is_first_chunk:  # True only if the file was empty
+            raise ValueError("Input CSV file was empty or unreadable.")
+
+        # 3. Upload the single, completed Parquet file to Azure
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
         os.remove(parquet_file)
+
         return [uri]
+
     except Exception as e:
-        print(f"[ERROR] Failed to convert CSV: {e}")
+        print(f"[ERROR] Failed to convert CSV via chunking: {e}")
         return []
     finally:
         if conn:
@@ -185,7 +210,9 @@ def convert_csv_to_parquet(input_path: str, output_dir: str, config: Any) -> Lis
 
 
 def convert_tsv_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
-    """Convert TSV to Parquet and upload."""
+    """
+    Convert TSV to Parquet and upload using chunking (streaming).
+    """
     temp_dir = "/tmp/parquet_cache"
     os.makedirs(temp_dir, exist_ok=True)
 
@@ -194,24 +221,45 @@ def convert_tsv_to_parquet(input_path: str, output_dir: str, config: Any) -> Lis
     )
     parquet_file = os.path.join(temp_dir, f"{base_name}.parquet")
 
+    CHUNK_SIZE = 100000
+
     conn = None
     try:
-        df = pd.read_csv(input_path, sep="\t")
-        df = clean_column_names(df)
-
         conn = setup_duckdb_azure_connection(config)
-        conn.register("temp_df", df)
-        conn.execute(
-            f"COPY temp_df TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
-        )
-        conn.unregister("temp_df")
-        del df
+
+        # Key difference: using sep='\t' for TSV
+        chunk_iterator = pd.read_csv(input_path, sep="\t", chunksize=CHUNK_SIZE)
+        is_first_chunk = True
+
+        for i, df_chunk in enumerate(chunk_iterator):
+            if is_first_chunk:
+                df_chunk = clean_column_names(df_chunk)
+                columns = df_chunk.columns
+                is_first_chunk = False
+            else:
+                df_chunk.columns = columns
+
+            conn.register("temp_chunk", df_chunk)
+
+            if i == 0:
+                conn.execute(
+                    f"COPY temp_chunk TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
+                )
+            else:
+                conn.execute(f"INSERT INTO '{parquet_file}' SELECT * FROM temp_chunk;")
+
+            conn.unregister("temp_chunk")
+            del df_chunk
+
+        if is_first_chunk:
+            raise ValueError("Input TSV file was empty or unreadable.")
 
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
         os.remove(parquet_file)
         return [uri]
+
     except Exception as e:
-        print(f"[ERROR] Failed to convert TSV: {e}")
+        print(f"[ERROR] Failed to convert TSV via chunking: {e}")
         return []
     finally:
         if conn:
@@ -219,7 +267,7 @@ def convert_tsv_to_parquet(input_path: str, output_dir: str, config: Any) -> Lis
 
 
 def convert_json_to_parquet(input_path: str, output_dir: str, config: Any) -> List[str]:
-    """Convert JSON to Parquet and upload."""
+    """Convert JSON to Parquet and upload (ensures immediate memory release)."""
     temp_dir = "/tmp/parquet_cache"
     os.makedirs(temp_dir, exist_ok=True)
 
@@ -230,6 +278,7 @@ def convert_json_to_parquet(input_path: str, output_dir: str, config: Any) -> Li
 
     conn = None
     try:
+        # Load entire JSON (often necessary for complex JSON structures)
         df = pd.read_json(input_path)
         df = clean_column_names(df)
 
@@ -239,10 +288,13 @@ def convert_json_to_parquet(input_path: str, output_dir: str, config: Any) -> Li
             f"COPY temp_df TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
         )
         conn.unregister("temp_df")
+
+        # ⚡️ CRITICAL OPTIMIZATION: Release the large DataFrame memory immediately
         del df
 
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
         os.remove(parquet_file)
+
         return [uri]
     except Exception as e:
         print(f"[ERROR] Failed to convert JSON: {e}")
@@ -337,9 +389,7 @@ def convert_to_parquet(input_path: str, output_dir: str, config: Any) -> List[st
         return []
 
 
-# ============================================================================
 # CATALOG GENERATION FUNCTIONS
-# ============================================================================
 
 
 def generate_column_summaries(
@@ -758,7 +808,7 @@ def generate_output_node(state: PipelineState) -> PipelineState:
     parquet_uris = state.get("parquet_uris", [])
     config = state["config"]
 
-    # Use frontend-provided session_id or generate one
+    # Use frontend-provided session_id
     session_id = state.get("session_id")
 
     # Get frontend-provided file_ids mapping (filename -> file_id)
@@ -951,9 +1001,7 @@ def error_handler_node(state: PipelineState) -> PipelineState:
     }
 
 
-# ============================================================================
 # GRAPH CONSTRUCTION
-# ============================================================================
 
 
 def build_ingestion_graph():
@@ -995,9 +1043,7 @@ def build_ingestion_graph():
     return compiled_graph
 
 
-# ============================================================================
 # MAIN EXECUTION
-# ============================================================================
 
 
 def run_ingestion_pipeline(
@@ -1080,6 +1126,7 @@ if __name__ == "__main__":
         "../sheets/MULTI.xlsx",
         "../sheets/loan.xlsx",
         "https://gist.githubusercontent.com/dsternlicht/74020ebfdd91a686d71e785a79b318d4/raw/d3104389ba98a8605f8e641871b9ce71eff73f7e/chartsninja-data-1.csv",
+        "../sheets/Regeneron - Test .xlsx",
     ]
 
     try:
@@ -1104,6 +1151,7 @@ if __name__ == "__main__":
                 "MULTI.xlsx": "PLACEHOLDER",
                 "loan.xlsx": "PLACEHOLDER",
                 "chartsninja-data-1.csv": "PLACEHOLDER",
+                "Regeneron - Test .xlsx": "PLACEHOLDER",
             },
         )
 
