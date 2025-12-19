@@ -27,7 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from config import VectorDBType, get_config
 
 try:
-    from chroma_ingestion_util import ingest_to_vector_db
+    from chroma_ingestion_util_tester import ingest_to_vector_db
 except ImportError:
 
     def ingest_to_vector_db(file_paths: List[str], collection_prefix=None) -> bool:
@@ -759,10 +759,7 @@ def generate_output_node(state: PipelineState) -> PipelineState:
     config = state["config"]
 
     # Use frontend-provided session_id or generate one
-    session_id = (
-        state.get("session_id")
-        or f"session-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    )
+    session_id = state.get("session_id")
 
     # Get frontend-provided file_ids mapping (filename -> file_id)
     file_ids = state.get("file_ids") or {}
@@ -777,10 +774,7 @@ def generate_output_node(state: PipelineState) -> PipelineState:
         original_filename = table_info["file_name"]
 
         # Use frontend-provided file_id if available, otherwise generate one
-        file_id = (
-            file_ids.get(original_filename)
-            or f"file-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{idx}"
-        )
+        file_id = file_ids.get(original_filename) or "PLACEHOLDER"
 
         file_extension = os.path.splitext(original_filename)[1].lower()
 
@@ -817,7 +811,7 @@ def generate_output_node(state: PipelineState) -> PipelineState:
 
         table_metadata = table_info.get("table_metadata", {})
         llm_tags = table_info.get("llm_tags", [])
-        language = table_info.get("language", "PLACEHOLDER")
+        language = table_info.get("language", "Failed")
 
         # Get LLM-generated main_topics and summary with fallbacks
         main_topics = table_info.get("main_topics")
@@ -1104,7 +1098,7 @@ if __name__ == "__main__":
             data_source="PLACEHOLDER",
             update_frequency="PLACEHOLDER",
             retention_period="PLACEHOLDER",
-            tags=["Q4", "2024"],
+            tags=[],
             session_id="PLACEHOLDER",
             file_ids={
                 "MULTI.xlsx": "PLACEHOLDER",
