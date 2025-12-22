@@ -144,14 +144,13 @@ def extract_schema_with_summary(
         escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
         conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
 
+        # 1. Extract Base Schema from Parquet (DuckDB)
         schema_df = conn.execute(
             f"DESCRIBE (SELECT * FROM read_parquet('{parquet_uri}'))"
         ).fetchdf()
-        col_info = {
-            row["column_name"]: row["column_type"] for _, row in schema_df.iterrows()
-        }
 
-        columns = [
+        # Base column info: name, type, DuckDB-derived nullable
+        base_columns = [
             {
                 "name": row["column_name"],
                 "type": row["column_type"],
@@ -159,29 +158,60 @@ def extract_schema_with_summary(
             }
             for _, row in schema_df.iterrows()
         ]
+        col_info_for_llm = {
+            row["column_name"]: row["column_type"] for _, row in schema_df.iterrows()
+        }
+
         row_count = conn.execute(
             f"SELECT COUNT(*) as count FROM read_parquet('{parquet_uri}')"
         ).fetchone()[0]
 
         schema_info = {
-            "columns": columns,
+            "columns": base_columns,
             "row_count": row_count,
-            "column_count": len(columns),
+            "column_count": len(base_columns),
         }
 
         if llm_client and deployment_name:
             try:
+                # 2. Generate LLM Metadata
                 sample_df = conn.execute(
                     f"SELECT * FROM read_parquet('{parquet_uri}') LIMIT 5"
                 ).fetchdf()
+
                 llm_metadata = generate_llm_summary(
-                    col_info,
+                    col_info_for_llm,
                     sample_df,
                     llm_client,
                     deployment_name,
                     os.path.basename(parquet_uri),
                 )
+
+                # --- START: THE KEY MODIFICATION TO MERGE DATA ---
+
+                # Extract the LLM column data, defaulting to an empty dict
+                llm_col_metadata = llm_metadata.pop("column_metadata", {})
+
+                final_columns = []
+                for col in base_columns:
+                    col_name = col["name"]
+
+                    # Merge LLM-generated description, is_primary_key, and nullable
+                    # into the base column dictionary. Keys from the LLM overwrite DuckDB if present.
+                    llm_data = llm_col_metadata.get(col_name, {})
+
+                    # Using dictionary unpacking (**) for merging
+                    merged_col = {**col, **llm_data}
+                    final_columns.append(merged_col)
+
+                # 3. Update schema_info with the MERGED column list
+                schema_info["columns"] = final_columns
+
+                # 4. Add the rest of the LLM metadata (table_metadata, tags, summary, etc.)
+                # Note: 'column_metadata' was already removed by .pop()
                 schema_info.update(llm_metadata)
+
+                # --- END: THE KEY MODIFICATION TO MERGE DATA ---
 
                 del sample_df
                 gc.collect()
