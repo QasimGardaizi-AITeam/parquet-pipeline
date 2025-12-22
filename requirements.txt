@@ -1,18 +1,11 @@
-# Requirements for Hybrid RAG Text-to-SQL Pipeline
-
-# --- Data Handling and Database ---
-pandas>=2.1.0 # Core data manipulation (reading Excel/Parquet)
-openpyxl>=3.1.2 # Dependency for reading .xlsx files with pandas
-pyarrow>=14.0.0 # Fast Parquet handling engine
-duckdb>=0.9.2 # Local SQL engine for query execution
-
-# --- LLM and Vector Embedding ---
-openai>=1.1.1 # Azure OpenAI Client (for GPT-4o and embeddings)
-
-# --- Vector Database (ChromaDB - Alternative) ---
-chromadb>=0.4.22 # ChromaDB for local vector storage and retrieval
-
-# --- Utilities and Environment ---
-python-dotenv>=1.0.1 # For loading .env file configuration
-typing # Standard library type hints (optional, but good practice)
-# uuid, datetime, os, sys, json, time, traceback are standard library
+python-dotenv>=1.0.1
+typing
+pandas>=2.0.0
+duckdb>=0.9.0
+requests>=2.31.0
+azure-storage-blob>=12.19.0
+langgraph>=0.0.30
+openai>=1.0.0
+openpyxl>=3.1.0
+pyarrow>=14.0.0
+tabulate>=0.9.0
