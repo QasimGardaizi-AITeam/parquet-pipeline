@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import duckdb
@@ -144,12 +145,10 @@ def extract_schema_with_summary(
         escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
         conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
 
-        # 1. Extract Base Schema from Parquet (DuckDB)
         schema_df = conn.execute(
             f"DESCRIBE (SELECT * FROM read_parquet('{parquet_uri}'))"
         ).fetchdf()
 
-        # Base column info: name, type, DuckDB-derived nullable
         base_columns = [
             {
                 "name": row["column_name"],
@@ -174,7 +173,6 @@ def extract_schema_with_summary(
 
         if llm_client and deployment_name:
             try:
-                # 2. Generate LLM Metadata
                 sample_df = conn.execute(
                     f"SELECT * FROM read_parquet('{parquet_uri}') LIMIT 5"
                 ).fetchdf()
@@ -186,32 +184,17 @@ def extract_schema_with_summary(
                     deployment_name,
                     os.path.basename(parquet_uri),
                 )
-
-                # --- START: THE KEY MODIFICATION TO MERGE DATA ---
-
-                # Extract the LLM column data, defaulting to an empty dict
                 llm_col_metadata = llm_metadata.pop("column_metadata", {})
 
                 final_columns = []
                 for col in base_columns:
                     col_name = col["name"]
-
-                    # Merge LLM-generated description, is_primary_key, and nullable
-                    # into the base column dictionary. Keys from the LLM overwrite DuckDB if present.
                     llm_data = llm_col_metadata.get(col_name, {})
-
-                    # Using dictionary unpacking (**) for merging
                     merged_col = {**col, **llm_data}
                     final_columns.append(merged_col)
 
-                # 3. Update schema_info with the MERGED column list
                 schema_info["columns"] = final_columns
-
-                # 4. Add the rest of the LLM metadata (table_metadata, tags, summary, etc.)
-                # Note: 'column_metadata' was already removed by .pop()
                 schema_info.update(llm_metadata)
-
-                # --- END: THE KEY MODIFICATION TO MERGE DATA ---
 
                 del sample_df
                 gc.collect()
@@ -418,15 +401,22 @@ def convert_to_parquet(
     all_azure_uris = []
     all_schema_info = []
 
+    tasks = []
     for input_file in input_files:
         is_url = isinstance(input_file, str) and (
             input_file.startswith("http://") or input_file.startswith("https://")
         )
+        tasks.append((input_file, config, is_url, llm_client, deployment_name))
 
-        azure_uris, schema_info = process_single_file(
-            input_file, config, is_url, llm_client, deployment_name
+    # 2. Execute tasks in parallel
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = executor.map(
+            lambda p: process_single_file(*p),
+            tasks,
         )
 
+    # 3. Aggregate results
+    for azure_uris, schema_info in results:
         all_azure_uris.extend(azure_uris)
         all_schema_info.extend(schema_info)
 
