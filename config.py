@@ -94,6 +94,7 @@ class AzureStorageConfig:
     account_name: str
     container_name: str
     connection_string: str
+    blob_url: str = "azure://auxeestorage.blob.core.windows.net/auxee-upload-files/"
 
     # Default fields
     account_key: Optional[str] = None

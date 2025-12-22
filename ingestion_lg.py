@@ -31,9 +31,7 @@ try:
 except ImportError:
 
     def ingest_to_vector_db(file_paths: List[str], collection_prefix=None) -> bool:
-        print(
-            f"[PLACEHOLDER] Vector ingestion for {len(file_paths)} files would run here."
-        )
+        print(f"[] Vector ingestion for {len(file_paths)} files would run here.")
         return True
 
 
@@ -165,37 +163,30 @@ def convert_csv_to_parquet(input_path: str, output_dir: str, config: Any) -> Lis
         chunk_iterator = pd.read_csv(input_path, chunksize=CHUNK_SIZE)
         is_first_chunk = True
 
-        # Iterate over chunks, process, and append to the Parquet file
         for i, df_chunk in enumerate(chunk_iterator):
-
             # 1. Clean column names only on the first chunk
             if is_first_chunk:
                 df_chunk = clean_column_names(df_chunk)
                 columns = df_chunk.columns
                 is_first_chunk = False
             else:
-                # Apply consistent schema/column names to subsequent chunks
                 df_chunk.columns = columns
 
-            # 2. Register the chunk and write/append using DuckDB
             conn.register("temp_chunk", df_chunk)
 
             if i == 0:
-                # First chunk CREATES the Parquet file (or overwrites)
                 conn.execute(
                     f"COPY temp_chunk TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
                 )
             else:
-                # Subsequent chunks INSERT/APPEND to the existing Parquet file
                 conn.execute(f"INSERT INTO '{parquet_file}' SELECT * FROM temp_chunk;")
 
             conn.unregister("temp_chunk")
-            del df_chunk  # Explicitly free the chunk memory
+            del df_chunk
 
-        if is_first_chunk:  # True only if the file was empty
+        if is_first_chunk:
             raise ValueError("Input CSV file was empty or unreadable.")
 
-        # 3. Upload the single, completed Parquet file to Azure
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
         os.remove(parquet_file)
 
@@ -288,8 +279,6 @@ def convert_json_to_parquet(input_path: str, output_dir: str, config: Any) -> Li
             f"COPY temp_df TO '{parquet_file}' (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000);"
         )
         conn.unregister("temp_df")
-
-        # ⚡️ CRITICAL OPTIMIZATION: Release the large DataFrame memory immediately
         del df
 
         uri = upload_file_to_azure(parquet_file, f"{base_name}.parquet", config)
@@ -399,7 +388,8 @@ def generate_column_summaries(
     deployment_name: str,
     filename: str,
 ) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any], List[str], str, List[str], str]:
-    """Calls the LLM to generate comprehensive column metadata, table-level analysis, intelligent tags, language detection, main topics, and summary."""
+    """Calls the LLM to generate comprehensive column metadata, table-level analysis, intelligent tags,
+    language detection, main topics, and summary."""
     if len(sample_data) > 5:
         sample_text = sample_data.head(5).to_markdown(index=False, tablefmt="plain")
     else:
@@ -817,14 +807,14 @@ def generate_output_node(state: PipelineState) -> PipelineState:
     catalog_entries = []
 
     user_provided_tags = state.get("tags", [])
-    upload_timestamp = state.get("upload_timestamp", "PLACEHOLDER")
-    processing_started = state.get("processing_started_timestamp", "PLACEHOLDER")
+    upload_timestamp = state.get("upload_timestamp", "")
+    processing_started = state.get("processing_started_timestamp", "")
 
     for idx, (parquet_path, table_info) in enumerate(catalog_dict.items()):
         original_filename = table_info["file_name"]
 
         # Use frontend-provided file_id if available, otherwise generate one
-        file_id = file_ids.get(original_filename) or "PLACEHOLDER"
+        file_id = file_ids.get(original_filename) or ""
 
         file_extension = os.path.splitext(original_filename)[1].lower()
 
@@ -847,10 +837,10 @@ def generate_output_node(state: PipelineState) -> PipelineState:
             column_entry = {
                 "name": col_name,
                 "type": col_type,
-                "nullable": llm_data.get("nullable", "PLACEHOLDER"),
-                "is_primary_key": llm_data.get("is_primary_key", "PLACEHOLDER"),
+                "nullable": llm_data.get("nullable", ""),
+                "is_primary_key": llm_data.get("is_primary_key", ""),
                 "order": order,
-                "description": llm_data.get("description", "PLACEHOLDER"),
+                "description": llm_data.get("description", ""),
             }
             columns_metadata.append(column_entry)
 
@@ -885,7 +875,7 @@ def generate_output_node(state: PipelineState) -> PipelineState:
             "filename": original_filename,
             "file_type": file_type,
             "file_category": "structured",
-            "file_size_bytes": "PLACEHOLDER",
+            "file_size_bytes": "",
             "mime_type": (
                 f"application/{file_type}" if file_type != "csv" else "text/csv"
             ),
@@ -900,8 +890,8 @@ def generate_output_node(state: PipelineState) -> PipelineState:
             "total_chunks": row_count // 100 if row_count > 100 else 1,
             "total_tokens": estimated_tokens,
             "total_characters": estimated_chars,
-            "total_pages": "PLACEHOLDER",
-            "blob_url": "PLACEHOLDER",
+            "total_pages": "",
+            "blob_url": config.azure_storage.blob_url or "",
             "blob_container": config.azure_storage.container_name,
             "blob_path": parquet_path,
             "parquet_url": parquet_path,
@@ -910,20 +900,18 @@ def generate_output_node(state: PipelineState) -> PipelineState:
                 "row_count": row_count,
                 "column_count": column_count,
                 "columns": columns_metadata,
-                "primary_key": table_metadata.get("primary_key", "PLACEHOLDER"),
+                "primary_key": table_metadata.get("primary_key", ""),
                 "foreign_keys": table_metadata.get("foreign_keys", []),
-                "data_quality_score": table_metadata.get(
-                    "data_quality_score", "PLACEHOLDER"
-                ),
-                "has_duplicates": table_metadata.get("has_duplicates", "PLACEHOLDER"),
-                "null_percentage": table_metadata.get("null_percentage", "PLACEHOLDER"),
+                "data_quality_score": table_metadata.get("data_quality_score", ""),
+                "has_duplicates": table_metadata.get("has_duplicates", ""),
+                "null_percentage": table_metadata.get("null_percentage", ""),
             },
             "graph_metadata": {
-                "graph_id": "PLACEHOLDER",
-                "node_count": "PLACEHOLDER",
-                "edge_count": "PLACEHOLDER",
-                "neo4j_status": "PLACEHOLDER",
-                "created_at": "PLACEHOLDER",
+                "graph_id": "",
+                "node_count": "",
+                "edge_count": "",
+                "neo4j_status": "",
+                "created_at": "",
             },
             "content_analysis": {
                 "language": language,
@@ -932,7 +920,7 @@ def generate_output_node(state: PipelineState) -> PipelineState:
                 "summary": summary,
             },
             "access_count": 0,
-            "last_accessed": "PLACEHOLDER",
+            "last_accessed": "",
             "accessed_by": [],
             "is_deleted": False,
             "is_public": False,
@@ -1140,18 +1128,18 @@ if __name__ == "__main__":
             input_files=INPUT_FILES,
             enable_llm_summaries=True,
             output_json_path="catalog_output.json",
-            user_id="PLACEHOLDER",
-            organization_id="PLACEHOLDER",
-            data_source="PLACEHOLDER",
-            update_frequency="PLACEHOLDER",
-            retention_period="PLACEHOLDER",
+            user_id="",
+            organization_id="",
+            data_source="",
+            update_frequency="",
+            retention_period="",
             tags=[],
-            session_id="PLACEHOLDER",
+            session_id="",
             file_ids={
-                "MULTI.xlsx": "PLACEHOLDER",
-                "loan.xlsx": "PLACEHOLDER",
-                "chartsninja-data-1.csv": "PLACEHOLDER",
-                "Regeneron - Test .xlsx": "PLACEHOLDER",
+                "MULTI.xlsx": "",
+                "loan.xlsx": "",
+                "chartsninja-data-1.csv": "",
+                "Regeneron - Test .xlsx": "",
             },
         )
 
