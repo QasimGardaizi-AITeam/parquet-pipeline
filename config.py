@@ -204,7 +204,6 @@ class AppConfig:
             vector_db = VectorDBConfig.from_env(db_type=vector_db_type)
 
             print("[INFO] Configuration loaded successfully")
-            print(f"[INFO] Vector DB: {vector_db.db_type.value}")
 
             return cls(
                 azure_openai=azure_openai,
