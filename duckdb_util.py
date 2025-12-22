@@ -1,9 +1,7 @@
 import atexit
-import glob
 import os
 import sys
 import threading
-import time
 from typing import Any, Dict, List, Tuple
 
 import duckdb
@@ -149,7 +147,7 @@ def get_parquet_context(
     config: Any = None,
 ) -> Tuple[str, pd.DataFrame]:
     """
-    Dynamically gets the combined schema and top 50 rows from each Parquet file
+    Dynamically gets the combined schema and top 10 rows from each Parquet file
     using the persistent DuckDB connection.
     """
     try:

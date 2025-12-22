@@ -1,18 +1,20 @@
 import os
 import sys
-import pandas as pd
 import time
-from openai import AzureOpenAI
-import chromadb
-from chromadb.config import Settings
-from typing import List, Dict, Any, Union
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Union
+
+import chromadb
 import duckdb
+import pandas as pd
+from chromadb.config import Settings
+from openai import AzureOpenAI
+
+from config import VectorDBType, get_config
 
 # --- 1. Configuration & Client Setup ---
 
-from config import get_config, VectorDBType
 
 # Get config
 config = get_config(VectorDBType.CHROMADB)
@@ -23,12 +25,12 @@ try:
     openai_client = AzureOpenAI(
         azure_endpoint=config.azure_openai.embedding_endpoint,
         api_key=config.azure_openai.embedding_api_key,
-        api_version=config.azure_openai.embedding_api_version
+        api_version=config.azure_openai.embedding_api_version,
     )
-    # Adding a check to confirm the client works (optional, but good practice)
-    # You might consider moving the client creation to a utility function or the main pipeline script.
 except Exception as e:
-    print(f"FATAL ERROR (ChromaDB Ingestion): Error initializing Azure OpenAI client: {e}")
+    print(
+        f"FATAL ERROR (ChromaDB Ingestion): Error initializing Azure OpenAI client: {e}"
+    )
     sys.exit(1)
 
 # Initialize ChromaDB client
@@ -37,69 +39,27 @@ try:
         path=config.vector_db.chromadb.persist_directory,
         settings=Settings(
             anonymized_telemetry=config.vector_db.chromadb.anonymized_telemetry
-        )
+        ),
     )
-    print(f"[INFO] ChromaDB client initialized. Persistence directory: {config.vector_db.chromadb.persist_directory}")
+    print(
+        f"[INFO] ChromaDB client initialized. Persistence directory: {config.vector_db.chromadb.persist_directory}"
+    )
 except Exception as e:
     print(f"FATAL ERROR (ChromaDB Ingestion): Error initializing ChromaDB client: {e}")
     sys.exit(1)
 
-from openai import RateLimitError
 
-def embed_with_retry(client, texts: List[str], deployment_name: str, max_retries: int = 5) -> List[List[float]]:
-    """
-    Embed texts with exponential backoff retry for rate limits.
-    
-    Args:
-        client: Azure OpenAI client
-        texts: List of texts to embed
-        deployment_name: Name of the embedding deployment
-        max_retries: Maximum number of retry attempts
-    
-    Returns:
-        List of embedding vectors
-    """
-    for attempt in range(max_retries):
-        try:
-            response = client.embeddings.create(
-                input=texts,
-                model=deployment_name
-            )
-            return [item.embedding for item in response.data]
-        
-        except RateLimitError as e:
-            if attempt == max_retries - 1:
-                raise  # Re-raise on final attempt
-            
-            # Extract wait time from error message or use exponential backoff
-            wait_time = 2 ** attempt  # 1, 2, 4, 8, 16 seconds
-            
-            # Try to parse the suggested wait time from the error message
-            error_msg = str(e)
-            if "retry after" in error_msg.lower():
-                try:
-                    import re
-                    match = re.search(r'retry after (\d+)', error_msg.lower())
-                    if match:
-                        wait_time = int(match.group(1))
-                except:
-                    pass
-            
-            print(f"[RATE LIMIT] Attempt {attempt + 1}/{max_retries} failed. Waiting {wait_time}s before retry...")
-            time.sleep(wait_time)
-        
-        except Exception as e:
-            print(f"[EMBEDDING ERROR] Unexpected error: {e}")
-            raise
-    
-    raise Exception("Failed to embed after all retries")
+# ------------------------------------------------
+# Helper function to read Parquet from Azure
+# ------------------------------------------------
+
 
 def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
     """
     Reads a Parquet file from either local path or Azure Blob Storage URI.
     Uses DuckDB for Azure URIs.
     """
-    if file_path.startswith('azure://'):
+    if file_path.startswith("azure://"):
         try:
             conn = duckdb.connect()
 
@@ -107,13 +67,19 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
             conn.execute("LOAD azure;")
 
             if config.azure_storage.connection_string:
-                escaped_conn_str = config.azure_storage.connection_string.replace("'", "''")
-                conn.execute(f"SET azure_storage_connection_string='{escaped_conn_str}';")
+                escaped_conn_str = config.azure_storage.connection_string.replace(
+                    "'", "''"
+                )
+                conn.execute(
+                    f"SET azure_storage_connection_string='{escaped_conn_str}';"
+                )
 
             df = conn.execute(f"SELECT * FROM read_parquet('{file_path}')").fetchdf()
             conn.close()
 
-            print(f"[INFO] Successfully read Parquet from Azure: {os.path.basename(file_path)}")
+            print(
+                f"[INFO] Successfully read Parquet from Azure: {os.path.basename(file_path)}"
+            )
             return df
 
         except Exception as e:
@@ -123,9 +89,14 @@ def read_parquet_from_azure(file_path: str) -> pd.DataFrame:
         return pd.read_parquet(file_path)
 
 
+# ------------------------------------------------
 # 2. Utility Functions
+# ------------------------------------------------
 
-def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) -> List[Dict[str, Any]]:
+
+def chunk_dataframe_dynamic(
+    df: pd.DataFrame, max_tokens_per_chunk: int = 1000
+) -> List[Dict[str, Any]]:
     """Dynamically chunk a DataFrame into text blocks."""
     chunks = []
     headers = list(df.columns)
@@ -134,18 +105,25 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
     current_size = 0
 
     for idx, row in df.iterrows():
-        row_values = [str(row[col]) if pd.notna(row[col]) else "NULL" for col in headers]
-        row_text = " | ".join([f"{col}: {val}" for col, val in zip(headers, row_values)])
+        row_values = [
+            str(row[col]) if pd.notna(row[col]) else "NULL" for col in headers
+        ]
+        row_text = " | ".join([f"{col}:{val}" for col, val in zip(headers, row_values)])
 
-        row_index_label = df.index.name if df.index.name else 'index'
+        row_index_label = df.index.name if df.index.name else "index"
         row_text_with_index = f"[{row_index_label} {idx}] {row_text}"
         row_size = len(row_text_with_index)
 
         if current_size + row_size > max_tokens_per_chunk and current_chunk:
-            chunks.append({
-                "text": "\n".join(current_chunk),
-                "metadata": {"row_indices": list(current_indices), "columns": list(headers)}
-            })
+            chunks.append(
+                {
+                    "text": "\n".join(current_chunk),
+                    "metadata": {
+                        "row_indices": list(current_indices),
+                        "columns": list(headers),
+                    },
+                }
+            )
             current_chunk, current_indices, current_size = [], [], 0
 
         current_chunk.append(row_text_with_index)
@@ -153,29 +131,34 @@ def chunk_dataframe_dynamic(df: pd.DataFrame, max_tokens_per_chunk: int = 1000) 
         current_size += row_size
 
     if current_chunk:
-        chunks.append({
-            "text": "\n\n".join(current_chunk),
-            "metadata": {"row_indices": list(current_indices), "columns": list(headers)}
-        })
+        chunks.append(
+            {
+                "text": "\n\n".join(current_chunk),
+                "metadata": {
+                    "row_indices": list(current_indices),
+                    "columns": list(headers),
+                },
+            }
+        )
     return chunks
 
 
 # --- MODIFIED: Client is now passed as an argument for thread safety ---
-def get_embedding_for_chunk(client: AzureOpenAI, chunk_texts: List[str]) -> List[List[float]]:
+def get_embedding_for_chunk(
+    client: AzureOpenAI, chunk_texts: List[str]
+) -> List[List[float]]:
     """Worker function to get embeddings for a batch of chunk texts."""
     try:
-        # embed_with_retry already returns List[List[float]]
-        embeddings = embed_with_retry(
-            client=client,
-            texts=chunk_texts,
-            deployment_name=config.azure_openai.embedding_deployment_name,
-            max_retries=5
+        # Use the passed client
+        response = client.embeddings.create(
+            model=config.azure_openai.embedding_deployment_name,
+            input=chunk_texts,
         )
-        return embeddings  # FIXED: Return embeddings directly
+        return [data.embedding for data in response.data]
     except Exception as e:
         print(f"[EMBEDDING ERROR] Failed to embed batch: {e}")
         return [[]] * len(chunk_texts)
-    
+
 
 # ------------------------------------------------
 # 3. Core Ingestion Function for ChromaDB
@@ -186,6 +169,7 @@ def _sanitize_collection_name(raw_name: str) -> str:
     3-512 chars, [a-zA-Z0-9._-], start/end alnum.
     """
     import re
+
     # Replace spaces with underscores and drop disallowed chars
     name = re.sub(r"[^a-zA-Z0-9._-]+", "_", raw_name).strip("_-.")
     # Enforce length constraints
@@ -202,25 +186,27 @@ def _sanitize_collection_name(raw_name: str) -> str:
     return name
 
 
-def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefix: str = None) -> Union[bool, str]:
+# RENAMED THE ORIGINAL FUNCTION TO BE PRIVATE
+def _ingest_single_file(
+    file_path: str, sheet_name: str = None, collection_prefix: str = None
+) -> Union[bool, str]:
     """
-    Loads data from the given Parquet file (local or Azure URI),
+    Loads data from a single Parquet file (local or Azure URI),
     chunks, embeds (in parallel), and inserts into ChromaDB.
     """
 
-    # NOTE: openai_client and chroma_client are global and used here.
-    # If this function is imported and called elsewhere, those globals must be defined first.
-    
     if collection_prefix is None:
         collection_prefix = config.vector_db.chromadb.collection_prefix
 
     # 1. Determine Dynamic Collection Name
-    base_name = os.path.splitext(os.path.basename(file_path.split('/')[-1]))[0]
+    base_name = os.path.splitext(os.path.basename(file_path.split("/")[-1]))[0]
 
     raw_collection_name = f"{collection_prefix}_{base_name}"
     COLLECTION_NAME = _sanitize_collection_name(raw_collection_name)
 
-    print(f"\n--- Starting ChromaDB Ingestion for Collection: '{COLLECTION_NAME}' (Source: {os.path.basename(file_path)}) ---")
+    print(
+        f"\n--- Starting ChromaDB Ingestion for Collection: '{COLLECTION_NAME}' (Source: {os.path.basename(file_path)}) ---"
+    )
 
     # 2. Load Data
     try:
@@ -240,11 +226,15 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
     print(f"Generated {len(chunks)} chunks.")
     chunk_texts = [c["text"] for c in chunks]
 
-    print(f"Starting parallel vector embedding using Azure Deployment: {config.azure_openai.embedding_deployment_name}...")
+    print(
+        f"Starting parallel vector embedding using Azure Deployment: {config.azure_openai.embedding_deployment_name}..."
+    )
 
     BATCH_SIZE = 200
     MAX_THREADS = 8
-    text_batches = [chunk_texts[i:i + BATCH_SIZE] for i in range(0, len(chunk_texts), BATCH_SIZE)]
+    text_batches = [
+        chunk_texts[i : i + BATCH_SIZE] for i in range(0, len(chunk_texts), BATCH_SIZE)
+    ]
 
     all_embeddings = []
     embedding_start_time = time.time()
@@ -253,14 +243,13 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
         with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
             future_to_batch = {
                 # --- MODIFIED: Passing openai_client explicitly ---
-                executor.submit(get_embedding_for_chunk, openai_client, batch): batch 
+                executor.submit(get_embedding_for_chunk, openai_client, batch): batch
                 for batch in text_batches
             }
 
             for future in as_completed(future_to_batch):
                 batch_embeddings = future.result()
                 all_embeddings.extend(batch_embeddings)
-                time.sleep(0.5)
 
         embedding_duration = time.time() - embedding_start_time
 
@@ -268,7 +257,9 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
             return f"Error during parallel embedding: One or more batches failed. Duration: {embedding_duration:.2f}s"
 
         embedding_dim = len(all_embeddings[0])
-        print(f"Embedding complete ({len(all_embeddings)} vectors) in {embedding_duration:.2f}s. Vector dimension: {embedding_dim}")
+        print(
+            f"Embedding complete ({len(all_embeddings)} vectors) in {embedding_duration:.2f}s. Vector dimension: {embedding_dim}"
+        )
 
     except Exception as e:
         return f"Error during ThreadPool or Azure OpenAI API call: {e}"
@@ -286,7 +277,7 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
         # Create new collection
         collection = chroma_client.create_collection(
             name=COLLECTION_NAME,
-            metadata={"hnsw:space": "cosine"} 
+            metadata={"hnsw:space": "cosine"},  # Use cosine similarity like MongoDB
         )
         print(f"[INFO] Created new ChromaDB collection '{COLLECTION_NAME}'")
 
@@ -297,8 +288,10 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
             {
                 **chunk["metadata"],
                 "source_file": os.path.basename(file_path),
-                "row_indices": str(chunk["metadata"]["row_indices"]),  # Convert list to string
-                "columns": str(chunk["metadata"]["columns"])  # Convert list to string
+                "row_indices": str(
+                    chunk["metadata"]["row_indices"]
+                ),  # Convert list to string
+                "columns": str(chunk["metadata"]["columns"]),  # Convert list to string
             }
             for chunk in chunks
         ]
@@ -316,17 +309,69 @@ def ingest_to_chroma_db(file_path: str, sheet_name: str = None, collection_prefi
                 ids=ids[i:batch_end],
                 embeddings=all_embeddings[i:batch_end],
                 documents=documents[i:batch_end],
-                metadatas=metadatas[i:batch_end]
+                metadatas=metadatas[i:batch_end],
             )
 
-            total_inserted += (batch_end - i)
-            print(f"[PROGRESS] Batch {batch_num}/{total_batches}: Inserted {batch_end - i} documents. Total: {total_inserted}/{len(ids)}")
+            total_inserted += batch_end - i
+            print(
+                f"[PROGRESS] Batch {batch_num}/{total_batches}: Inserted {batch_end - i} documents. Total: {total_inserted}/{len(ids)}"
+            )
 
-        print(f"[SUCCESS] All {total_inserted} chunks inserted successfully into ChromaDB.")
-        print(f"[INFO] Collection '{COLLECTION_NAME}' now contains {collection.count()} documents.")
+        print(
+            f"[SUCCESS] All {total_inserted} chunks inserted successfully into ChromaDB."
+        )
+        print(
+            f"[INFO] Collection '{COLLECTION_NAME}' now contains {collection.count()} documents."
+        )
 
         return True
 
     except Exception as e:
         traceback.print_exc(file=sys.stdout)
         return f"An error occurred during ChromaDB insertion: {e}"
+
+
+# NEW PUBLIC ENTRY POINT FOR PARALLEL LIST PROCESSING
+def ingest_to_vector_db(file_paths: List[str], collection_prefix: str = None) -> bool:
+    """
+    Accepts a list of Parquet URI paths and concurrently submits each file
+    for processing using an internal ThreadPoolExecutor.
+    """
+    if not file_paths:
+        print("[WARNING] No file paths provided for ingestion.")
+        return True
+
+    MAX_INGESTION_WORKERS = 4  # Use a moderate number of workers
+
+    print(f"\n--- Starting Parallel ChromaDB Ingestion for {len(file_paths)} URIs ---")
+
+    all_successful = True
+
+    # Internal ThreadPoolExecutor to run ingestion for each file concurrently
+    with ThreadPoolExecutor(max_workers=MAX_INGESTION_WORKERS) as executor:
+        # Submit the single-file helper function for each path
+        future_to_file = {
+            executor.submit(
+                _ingest_single_file, path, collection_prefix=collection_prefix
+            ): path
+            for path in file_paths
+        }
+
+        for future in as_completed(future_to_file):
+            path = future_to_file[future]
+            try:
+                result = future.result()
+                if result is not True:
+                    print(
+                        f"[ERROR] Ingestion failed for {os.path.basename(path)}: {result}"
+                    )
+                    all_successful = False
+                else:
+                    print(f"[SUCCESS] Ingestion complete for {os.path.basename(path)}")
+            except Exception as e:
+                print(
+                    f"[FATAL ERROR] Ingestion worker failed for {os.path.basename(path)}: {e}"
+                )
+                all_successful = False
+
+    return all_successful
