@@ -170,7 +170,7 @@ def analyze_user_query(
     --- END CATALOG ---
 
     **DECOMPOSITION RULES:**
-    1. Break into MULTIPLE sub-questions ONLY if they are atomically independent OR one depends on another's result
+    1. Break into MULTIPLE sub-questions ONLY if they are atomically independent OR one depends on another's result. If it can be handeled via single sql query then do not decompose.
     2. Keep as SINGLE question if all parts share the same filter/aggregation
     3. Examples of decomposition:
     - "What's max income AND status for Smith?" → 2 questions (independent topics)
@@ -916,8 +916,8 @@ def main():
     test_queries = [
         # "What is the maximum loan amount and what is the status for applicant Smith?",
         # "Find all auto loans with their approval status and interest rates",
-        # "Get the highest income applicant, then show me their loan details",
-        "explain all files",
+        "Get the highest income applicant, then show me their loan details",
+        # "explain all files",
     ]
 
     for query in test_queries:
