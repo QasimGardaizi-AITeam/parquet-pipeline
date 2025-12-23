@@ -48,7 +48,7 @@ if __name__ == "__main__":
 
     config = get_config(VectorDBType.CHROMADB)
 
-    path = "./Housing.csv"  # ANY FILE
+    path = "./active.pdf"  # ANY FILE
 
     start = time.time()
     azure_uri = upload_file_to_azure(path, config)
