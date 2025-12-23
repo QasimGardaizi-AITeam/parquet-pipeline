@@ -880,7 +880,7 @@ def process_multi_intent_query(
 
 def main():
     """Example usage of the multi-intent query processing pipeline"""
-    from config import VectorDBType, get_config
+    from ..config import VectorDBType, get_config
 
     # Load actual configuration
     config = get_config(VectorDBType.CHROMADB)
@@ -892,7 +892,7 @@ def main():
     )
 
     # Load catalog schema
-    CATALOG_FILE = "x.json"
+    CATALOG_FILE = "./pipeline/execution/x.json"
     try:
         with open(CATALOG_FILE, "r") as f:
             catalog_data = json.load(f)

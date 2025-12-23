@@ -486,7 +486,7 @@ if __name__ == "__main__":
     )
 
     azure_uris, schemas = convert_to_parquet(
-        ["azure://auxeestorage.blob.core.windows.net/auxee-upload-files/Housing.csv"],
+        ["./emergent.xlsx"],
         config=config,
         llm_client=llm_client,
         deployment_name=config.azure_openai.llm_deployment_name,
