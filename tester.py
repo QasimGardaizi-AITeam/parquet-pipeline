@@ -35,6 +35,14 @@ def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def safe_blob_name(name: str) -> str:
+    # Replace invalid characters for Azure Blob Storage
+    name = re.sub(r"[^\w\-]", "_", name)
+    name = re.sub(r"_+", "_", name)
+    name = name.strip("_")
+    return name[:1024]
+
+
 def download_blob(url: str, local_path: str, timeout: int = 300) -> None:
     response = requests.get(url, stream=True, timeout=timeout)
     response.raise_for_status()
@@ -45,6 +53,7 @@ def download_blob(url: str, local_path: str, timeout: int = 300) -> None:
 
 
 def upload_to_azure(local_path: str, remote_name: str, config: Any) -> str:
+    remote_name = safe_blob_name(remote_name)
     client = BlobServiceClient.from_connection_string(
         config.azure_storage.connection_string
     )
@@ -61,6 +70,16 @@ def detect_format(file_path: str) -> str:
     ext = os.path.splitext(file_path)[1].lower()
     format_map = {".xlsx": "excel", ".xls": "excel", ".csv": "csv", ".tsv": "tsv"}
     return format_map.get(ext, "unknown")
+
+
+def read_csv_with_fsspec(path: str, **kwargs):
+    # If URL starts with azure:// use adlfs
+    if path.startswith("azure://"):
+        import fsspec
+
+        fs = fsspec.filesystem("abfs")
+        return pd.read_csv(path, storage_options={}, **kwargs)
+    return pd.read_csv(path, **kwargs)
 
 
 def generate_llm_summary(
@@ -287,16 +306,14 @@ def convert_excel_to_parquet(
         if not isinstance(sheets, dict):
             sheets = {"Sheet1": sheets}
 
-        base_name = re.sub(
-            r"[^\w]", "_", os.path.splitext(os.path.basename(input_path))[0]
-        )
+        base_name = safe_blob_name(os.path.splitext(os.path.basename(input_path))[0])
 
         for sheet, df in sheets.items():
             if df.empty or df.shape[1] == 0:
                 continue
 
             df = clean_column_names(df)
-            safe_sheet = re.sub(r"[^\w]", "_", str(sheet))
+            safe_sheet = safe_blob_name(str(sheet))
             output_path = os.path.join(
                 output_dir,
                 (
@@ -338,10 +355,48 @@ def process_single_file(
 
     try:
         if is_url:
-            ext = os.path.splitext(input_file.split("?")[0])[1].lower()
-            temp_file = os.path.join(temp_dir, f"download{ext}")
-            download_blob(input_file, temp_file)
-            file_path = temp_file
+            if isinstance(input_file, str) and input_file.startswith("azure://"):
+                # Handle Azure blob URIs directly with DuckDB
+                # No need to download - DuckDB can read directly from Azure
+                file_path = input_file
+                file_format = "csv"  # or detect from the URL path
+
+                # Extract extension from Azure URI
+                path_part = input_file.split("?")[0]  # Remove query params if any
+                ext = os.path.splitext(path_part)[1].lower()
+                if ext in [".csv", ".tsv", ".xlsx", ".xls"]:
+                    file_format = detect_format(path_part)
+
+                # For Azure URIs, we need to process differently
+                # Download the file first using Azure SDK
+                blob_service_client = BlobServiceClient.from_connection_string(
+                    config.azure_storage.connection_string
+                )
+
+                # Parse Azure URI: azure://account.blob.core.windows.net/container/path
+                uri_parts = input_file.replace("azure://", "").split("/", 2)
+                account_container = uri_parts[1]  # container name
+                blob_path = uri_parts[2] if len(uri_parts) > 2 else ""
+
+                container_client = blob_service_client.get_container_client(
+                    account_container
+                )
+                blob_client = container_client.get_blob_client(blob_path)
+
+                ext = os.path.splitext(blob_path)[1].lower()
+                temp_file = os.path.join(temp_dir, f"download{ext}")
+
+                with open(temp_file, "wb") as f:
+                    download_stream = blob_client.download_blob()
+                    f.write(download_stream.readall())
+
+                file_path = temp_file
+            else:
+                # Handle HTTP/HTTPS URLs
+                ext = os.path.splitext(input_file.split("?")[0])[1].lower()
+                temp_file = os.path.join(temp_dir, f"download{ext}")
+                download_blob(input_file, temp_file)
+                file_path = temp_file
         elif isinstance(input_file, bytes):
             temp_file = os.path.join(temp_dir, "upload.bin")
             with open(temp_file, "wb") as f:
@@ -356,16 +411,12 @@ def process_single_file(
         if file_format == "excel":
             local_parquet_paths = convert_excel_to_parquet(file_path, temp_dir)
         elif file_format == "csv":
-            base_name = re.sub(
-                r"[^\w]", "_", os.path.splitext(os.path.basename(file_path))[0]
-            )
+            base_name = safe_blob_name(os.path.splitext(os.path.basename(file_path))[0])
             output_path = os.path.join(temp_dir, f"{base_name}.parquet")
             convert_csv_to_parquet(file_path, output_path)
             local_parquet_paths = [output_path]
         elif file_format == "tsv":
-            base_name = re.sub(
-                r"[^\w]", "_", os.path.splitext(os.path.basename(file_path))[0]
-            )
+            base_name = safe_blob_name(os.path.splitext(os.path.basename(file_path))[0])
             output_path = os.path.join(temp_dir, f"{base_name}.parquet")
             convert_tsv_to_parquet(file_path, output_path)
             local_parquet_paths = [output_path]
@@ -373,7 +424,7 @@ def process_single_file(
             raise ValueError(f"Unsupported format: {file_format}")
 
         for local_path in local_parquet_paths:
-            remote_name = os.path.basename(local_path)
+            remote_name = safe_blob_name(os.path.basename(local_path))
             azure_uri = upload_to_azure(local_path, remote_name, config)
             azure_uris.append(azure_uri)
 
@@ -404,18 +455,15 @@ def convert_to_parquet(
     tasks = []
     for input_file in input_files:
         is_url = isinstance(input_file, str) and (
-            input_file.startswith("http://") or input_file.startswith("https://")
+            input_file.startswith("http://")
+            or input_file.startswith("https://")
+            or input_file.startswith("azure://")
         )
         tasks.append((input_file, config, is_url, llm_client, deployment_name))
 
-    # 2. Execute tasks in parallel
     with ThreadPoolExecutor(max_workers=4) as executor:
-        results = executor.map(
-            lambda p: process_single_file(*p),
-            tasks,
-        )
+        results = executor.map(lambda p: process_single_file(*p), tasks)
 
-    # 3. Aggregate results
     for azure_uris, schema_info in results:
         all_azure_uris.extend(azure_uris)
         all_schema_info.extend(schema_info)
@@ -438,10 +486,7 @@ if __name__ == "__main__":
     )
 
     azure_uris, schemas = convert_to_parquet(
-        [
-            "./loan.xlsx",
-            "https://gist.githubusercontent.com/dsternlicht/74020ebfdd91a686d71e785a79b318d4/raw/d3104389ba98a8605f8e641871b9ce71eff73f7e/chartsninja-data-1.csv",
-        ],
+        ["azure://auxeestorage.blob.core.windows.net/auxee-upload-files/Housing.csv"],
         config=config,
         llm_client=llm_client,
         deployment_name=config.azure_openai.llm_deployment_name,
