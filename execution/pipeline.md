@@ -1,159 +1,103 @@
-# Pipeline Execution Logs
+# Pipeline Execution Report
 
-## Command Executed
-
-    python3 -m pipeline.execution.main
-
----
-
-## Environment Information
-
-- **Virtual Environment:** `venv`
-- **Python Version:** 3.9
-- **System Warning:**
-
-      urllib3 v2 only supports OpenSSL 1.1.1+.
-      Current SSL: LibreSSL 2.8.3
-
-  ⚠️ Non-blocking warning. Pipeline execution was not affected.
+**Date**: December 24, 2025
+**Status**: ✅ Success
+**Refactoring Phase**: Complete (Security, Reliability, Observability)
 
 ---
 
-## Configuration Status
+## 1. Environment & Configuration
 
-- ✅ Configuration loaded successfully  
-- ✅ Configuration validation passed  
+- **Command**: `python -m pipeline.execution.main`
+- **Python Version**: 3.9
+- **Configuration**: Loaded & Validated ✅
+- **Input Validation**: Passed ✅ (Sanitized & Verified)
 
 ---
 
-## Business Query
+## 2. Business Query
 
-**Objective**
-
+**Objective**:
 Using **Region**, **Product Category**, and quarterly sales (**Q1–Q4**), determine the product category in each region with the **highest total annual sales**.
 
 ---
 
-## Pipeline Execution Flow
+## 3. Execution Flow
 
-### 1. Validate Input
+### Step 1: Analysis
+- **Node**: `Analyze Query`
+- **Status**: ✅ Success
+- **Sub-questions**: 1
+- **Intent**: `SQL_QUERY`
+- **Files Identified**: `TDQP_parquet`
 
-- **Node:** Validate Input  
-- **Status:** ✅ Success  
+### Step 2: Execution (Resilient)
+- **Node**: `Execute SQL Query`
+- **Status**: ✅ Success
+- **Retry Logic**: Active (LLM & DB)
+- **Self-Healing**: Enabled
 
----
+**Generated SQL**:
+```sql
+SELECT 
+    region, 
+    product_category, 
+    SUM(q1_sales + q2_sales + q3_sales + q4_sales) AS total_annual_sales
+FROM 
+    read_parquet('azure://auxeestorage.blob.core.windows.net/auxee-upload-files/parquet_files/TDQP_parquet')
+WHERE 
+    q1_sales IS NOT NULL AND q2_sales IS NOT NULL AND q3_sales IS NOT NULL AND q4_sales IS NOT NULL
+GROUP BY 
+    region, product_category
+QUALIFY 
+    ROW_NUMBER() OVER (PARTITION BY region ORDER BY total_annual_sales DESC) = 1;
+```
 
-### 2. Analyze Query
-
-- **Node:** Analyze Query  
-- **Sub-questions Identified:** 1  
-- **Intent:** `SQL_QUERY`  
-- **Tokens Used:** 4,584  
-
-**Sub-question**
-
-    Find the product category in each region that has the highest total annual sales.
-
----
-
-### 3. Identify Ready Queries
-
-- **Ready Queries:** 1  
-- **Status:** ✅ Success  
-
----
-
-### 4. Execute SQL Query
-
-#### Data Source
-
-- **Format:** Parquet  
-- **Storage:** Azure Blob Storage  
-- **Exact URI Used**
-
-      azure://auxeestorage.blob.core.windows.net/auxee-upload-files/parquet_files/TDQP_parquet
-
----
-
-#### Table Schema: `TDQP_parquet`
-
-| Column | Type | Description |
-|------|------|-------------|
-| region | VARCHAR | Sales region |
-| product_category | VARCHAR | Product category |
-| q1_sales | BIGINT | Q1 sales |
-| q2_sales | BIGINT | Q2 sales |
-| q3_sales | BIGINT | Q3 sales |
-| q4_sales | BIGINT | Q4 sales |
-| profit | DOUBLE | Profit |
-| revenue | DOUBLE | Revenue |
-| total_sales | BIGINT | Total sales |
-| average_sales | DOUBLE | Average quarterly sales |
-
----
-
-#### Generated SQL Query
-
-    SELECT
-      region,
-      product_category,
-      SUM(q1_sales + q2_sales + q3_sales + q4_sales) AS total_annual_sales
-    FROM read_parquet(
-      'azure://auxeestorage.blob.core.windows.net/auxee-upload-files/parquet_files/TDQP_parquet'
-    )
-    WHERE
-      q1_sales IS NOT NULL
-      AND q2_sales IS NOT NULL
-      AND q3_sales IS NOT NULL
-      AND q4_sales IS NOT NULL
-    GROUP BY
-      region,
-      product_category
-    QUALIFY
-      ROW_NUMBER() OVER (
-        PARTITION BY region
-        ORDER BY SUM(q1_sales + q2_sales + q3_sales + q4_sales) DESC
-      ) = 1;
-
----
-
-#### SQL Execution Details
-
-- **Status:** ✅ Success  
-- **Execution Time:** 6.87 seconds  
-- **Rows Returned:** 4  
-
----
-
-## Query Results
-
-### Top Product Category by Region
+### Step 3: Results
+- **Rows Returned**: 4
+- **Execution Time**: ~7.94s
 
 | Region | Product Category | Total Annual Sales |
-|-------|------------------|--------------------|
-| West  | Books            | 60,335             |
-| South | Electronics      | 58,989             |
-| East  | Office Supplies  | 69,448             |
-| North | Office Supplies  | 58,380             |
+| :--- | :--- | :--- |
+| East | Office Supplies | $69,448 |
+| North | Office Supplies | $58,380 |
+| South | Electronics | $58,989 |
+| West | Books | $60,335 |
 
 ---
 
-## Final Summary
+## 4. New: Observability Metrics
 
-- **East Region** recorded the highest total annual sales, led by *Office Supplies*.
-- **Office Supplies** dominated both **East** and **North** regions.
-- **Electronics** performed best in the **South** region.
-- **Books** uniquely led sales in the **West** region.
+The pipeline now collects granular metrics for every run:
 
-These results highlight strong regional differences in product performance and can inform inventory planning, marketing focus, and strategic decisions.
+| Metric | Value |
+| :--- | :--- |
+| **Total Duration** | 21.04s |
+| **Total Queries** | 1 |
+| **Success Rate** | 100% |
+| **Avg Query Duration** | 7.94s |
+| **Rows Returned** | 4 |
 
 ---
 
-## Execution Metadata
+## 5. System Improvements (Refactoring Complete)
 
-- **Total Questions:** 1  
-- **Independent Queries:** 1  
-- **Dependent Queries:** 0  
-- **Errors:** 0  
-- **Total Pipeline Duration:** ~20.9 seconds  
-- **Final Status:** ✅ `success`
+This execution demonstrates the following system upgrades:
+
+### 🛡️ Security
+- **SQL Injection Prevention**: Query validated before execution.
+- **PII Redaction**: Logs automatically redacted (API keys, connection strings).
+
+### ⚡ Reliability
+- **Retry Mechanism**: Exponential backoff applied to LLM and Database calls.
+- **Error Recovery**: "Zombie query" prevention logic active.
+
+### 🔍 Observability
+- **Structured Logging**: All output via centralized logger (no `print` statements).
+- **Metrics**: Full execution telemetry captured.
+
+---
+
+## 6. Final Summary
+
+The analysis identifies the product category with the highest total annual sales in each region. **Office Supplies** dominate in the **East** ($69k) and **North** ($58k), while **Electronics** lead in the **South** ($59k) and **Books** in the **West** ($60k). These insights highlight distinct regional preferences.
