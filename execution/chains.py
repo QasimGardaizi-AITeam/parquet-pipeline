@@ -141,6 +141,7 @@ def generate_sql_chain(
     df_sample: str,
     path_map: Dict[str, str],
     semantic_context: str = "",
+    error_message: str = None,  # <--- ADDED: Error message for self-healing
 ) -> Tuple[str, str]:
     """
     Generate SQL query using LLM.
@@ -153,6 +154,7 @@ def generate_sql_chain(
         df_sample: Sample data info
         path_map: Mapping of files to URIs
         semantic_context: Optional semantic context
+        error_message: Optional error message from a previous failed attempt (for self-healing)
 
     Returns:
         Tuple of (sql_query, explanation)
@@ -165,6 +167,17 @@ def generate_sql_chain(
 {semantic_context}
 
 Use exact values from semantic context in WHERE clauses.
+"""
+
+    # Build error correction hint for self-healing
+    error_correction_hint = ""
+    if error_message:
+        error_correction_hint = f"""
+--- PREVIOUS FAILURE (CRITICAL) ---
+The LAST ATTEMPT to generate and execute SQL FAILED with the following error:
+{error_message}
+
+You MUST REVISE the SQL QUERY to fix this error. Your new SQL must resolve the issue described above.
 """
 
     # Build path hint
@@ -188,6 +201,7 @@ Use exact values from semantic context in WHERE clauses.
 Generate DuckDB SQL query for Parquet files on Azure Blob Storage.
 
 {augmentation_hint}
+{error_correction_hint} # <--- INCLUDED ERROR HINT
 {PATH_HINT}
 
 --- SCHEMA ---
@@ -215,9 +229,6 @@ Return valid JSON:
     "explanation": "Brief explanation"
 }}
 """
-    print("%" * 70)
-    print(sql_prompt)
-    print("%" * 70)
 
     try:
         response = llm_client.chat.completions.create(

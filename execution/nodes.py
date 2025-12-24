@@ -193,10 +193,7 @@ def identify_ready_queries_node(state: GraphState) -> GraphState:
 
 def execute_sql_query_node(state: GraphState) -> GraphState:
     """
-    Execute SQL queries in current batch.
-
-    This node now dynamically reads the top 5 rows of the required Parquet file
-    to use as sample data for LLM SQL generation.
+    Execute SQL queries in current batch with LLM-based self-healing fallback.
     """
     print("\n" + "=" * 80)
     print(f"NODE: Execute SQL Queries (Batch: {len(state['current_batch'])})")
@@ -229,111 +226,156 @@ def execute_sql_query_node(state: GraphState) -> GraphState:
 
         start_time = time.time()
 
-        try:
-            # Get dependency result if needed
-            dependency_result = ""
-            if analysis["depends_on_index"] >= 0:
-                dep_result = state["executed_results"].get(analysis["depends_on_index"])
-                if dep_result and dep_result["status"] == "success":
-                    dependency_result = dep_result["results"]
-                    print(f"→ Using result from Q{analysis['depends_on_index'] + 1}")
+        # --- SELF-HEALING FALLBACK MECHANISM START ---
 
-            # 1. Extract schema (we ignore the old df_sample returned by this function)
-            parquet_schema, _ = extract_schema_from_catalog(
-                analysis["required_files"], state["global_catalog_dict"]
-            )
+        sql_query = None
+        explanation = None
+        result_df = None
+        error_msg = None
 
-            # 2. Build path map
-            path_map = build_path_mapping(
-                analysis["required_files"], state["global_catalog_dict"]
-            )
+        # Track the error from the previous attempt for self-healing
+        previous_error_msg = None
 
-            # 3. --- NEW LOGIC: DYNAMICALLY READ TOP ROWS FOR SAMPLE DATA ---
-            df_sample = "No sample data available or required."
-            if path_map:
-                # Use the URI of the first required file to fetch sample data
-                first_file_name = analysis["required_files"][0]
-                first_uri = path_map.get(first_file_name) or list(path_map.values())[0]
+        # Max 2 attempts: 1 original attempt + 1 self-healing fallback
+        max_attempts = 2
 
-                print(f"Reading sample data from: {first_uri}")
-                df_sample_markdown = read_top_rows_duckdb(first_uri, state["config"])
+        for attempt in range(max_attempts):
 
-                # Format the sample data for the LLM prompt
-                df_sample = (
-                    f"--- Actual Sample Rows from '{first_file_name}' ---\n"
-                    + df_sample_markdown
-                )
-                print(f"[SAMPLE] Successfully read sample rows.")
-            # ------------------------------------------------------------------
+            current_sql_query = None
+            current_explanation = None
+            current_error_msg = None
 
-            # 4. Generate SQL
-            sql_query, explanation = generate_sql_chain(
-                llm_client=llm_client,
-                deployment_name=state["config"].azure_openai.llm_deployment_name,
-                user_query=analysis["sub_question"],
-                parquet_schema=parquet_schema,
-                df_sample=df_sample,  # <--- PASS THE NEW DYNAMIC SAMPLE
-                path_map=path_map,
-                semantic_context=dependency_result,
-            )
+            try:
+                if attempt > 0:
+                    print(
+                        f"--- FAILED. ATTEMPTING SELF-HEALING FALLBACK (Try {attempt + 1}/{max_attempts}) ---"
+                    )
+                    # previous_error_msg will be passed to generate_sql_chain below
 
-            print(f"[SQL] {sql_query}")
-            print(f"[EXPLANATION] {explanation}")
+                # 1. Get dependency result if needed
+                dependency_result = ""
+                if analysis["depends_on_index"] >= 0:
+                    dep_result = state["executed_results"].get(
+                        analysis["depends_on_index"]
+                    )
+                    if dep_result and dep_result["status"] == "success":
+                        dependency_result = dep_result["results"]
+                        if attempt == 0 or state["enable_debug"]:
+                            print(
+                                f"→ Using result from Q{analysis['depends_on_index'] + 1}"
+                            )
 
-            # 5. Execute query
-            result_df = execute_duckdb_query(sql_query, state["config"])
-
-            execution_duration = time.time() - start_time
-
-            # Check for errors
-            if "Error" in result_df.columns:
-                error_msg = result_df["Error"].iloc[0]
-                state["executed_results"][idx] = QueryResult(
-                    sub_question=analysis["sub_question"],
-                    intent=analysis["intent"],
-                    status="error",
-                    sql_query=sql_query,
-                    sql_explanation=explanation,
-                    results=df_to_json_result(result_df),
-                    execution_duration=execution_duration,
-                    error=error_msg,
-                )
-                print(f"[ERROR] {error_msg}")
-            else:
-                state["executed_results"][idx] = QueryResult(
-                    sub_question=analysis["sub_question"],
-                    intent=analysis["intent"],
-                    status="success",
-                    sql_query=sql_query,
-                    sql_explanation=explanation,
-                    results=df_to_json_result(result_df),
-                    execution_duration=execution_duration,
-                    error=None,
-                )
-                print(f"[SUCCESS] Executed in {execution_duration:.2f}s")
-                print(
-                    f"[RESULTS] {result_df.shape[0]} rows x {result_df.shape[1]} cols"
+                # 2. Extract schema
+                parquet_schema, _ = extract_schema_from_catalog(
+                    analysis["required_files"], state["global_catalog_dict"]
                 )
 
-                if state["enable_debug"] and not result_df.empty:
-                    print("\n" + result_df.head(5).to_markdown(index=False))
+                # 3. Build path map
+                path_map = build_path_mapping(
+                    analysis["required_files"], state["global_catalog_dict"]
+                )
 
-        except Exception as e:
-            execution_duration = time.time() - start_time
-            error_msg = str(e)
+                # 4. Dynamic sample data logic
+                df_sample = "No sample data available or required."
+                if path_map:
+                    first_file_name = analysis["required_files"][0]
+                    first_uri = (
+                        path_map.get(first_file_name) or list(path_map.values())[0]
+                    )
 
+                    if attempt == 0 or state["enable_debug"]:
+                        print(f"Reading sample data from: {first_uri}")
+
+                    df_sample_markdown = read_top_rows_duckdb(
+                        first_uri, state["config"]
+                    )
+
+                    df_sample = (
+                        f"--- Actual Sample Rows from '{first_file_name}' ---\n"
+                        + df_sample_markdown
+                    )
+                    if attempt == 0 or state["enable_debug"]:
+                        print(f"[SAMPLE] Successfully read sample rows.")
+
+                # 5. Generate SQL
+                current_sql_query, current_explanation = generate_sql_chain(
+                    llm_client=llm_client,
+                    deployment_name=state["config"].azure_openai.llm_deployment_name,
+                    user_query=analysis["sub_question"],
+                    parquet_schema=parquet_schema,
+                    df_sample=df_sample,
+                    path_map=path_map,
+                    semantic_context=dependency_result,
+                    error_message=previous_error_msg,  # <--- PASS ERROR FOR SELF-HEALING
+                )
+
+                print(f"[SQL] {current_sql_query}")
+                print(f"[EXPLANATION] {current_explanation}")
+
+                # 6. Execute query
+                result_df = execute_duckdb_query(current_sql_query, state["config"])
+
+                # Check for execution errors (DuckDB returns a DataFrame with an 'Error' column)
+                if "Error" in result_df.columns:
+                    current_error_msg = result_df["Error"].iloc[0]
+                    # This raises an exception to trigger the next attempt or final failure
+                    raise Exception(f"DuckDB Execution Error: {current_error_msg}")
+
+                # If successful, assign final values and break the retry loop
+                sql_query = current_sql_query
+                explanation = current_explanation
+                error_msg = None  # Clear any previous error
+                break
+
+            except Exception as e:
+                # Store the error from this attempt to feed back to the LLM on the next attempt
+                previous_error_msg = str(e)
+                # Store the SQL/Explanation that failed for final logging if max_attempts is reached
+                sql_query = current_sql_query
+                explanation = current_explanation
+                error_msg = previous_error_msg
+
+                if attempt == max_attempts - 1:
+                    print(
+                        f"[FINAL ERROR] Failed after {max_attempts} attempts: {error_msg}"
+                    )
+                else:
+                    print(f"[ERROR] Attempt {attempt + 1} failed: {error_msg}")
+
+        # --- SELF-HEALING FALLBACK MECHANISM END ---
+
+        execution_duration = time.time() - start_time
+
+        # Process result after retry loop
+        if error_msg:
+            # Final failure case
             state["executed_results"][idx] = QueryResult(
                 sub_question=analysis["sub_question"],
                 intent=analysis["intent"],
                 status="error",
-                sql_query=None,
-                sql_explanation=None,
+                sql_query=sql_query,
+                sql_explanation=explanation,
                 results=json.dumps({"Error": error_msg}),
                 execution_duration=execution_duration,
                 error=error_msg,
             )
+        elif result_df is not None:
+            # Final success case
+            state["executed_results"][idx] = QueryResult(
+                sub_question=analysis["sub_question"],
+                intent=analysis["intent"],
+                status="success",
+                sql_query=sql_query,
+                sql_explanation=explanation,
+                results=df_to_json_result(result_df),
+                execution_duration=execution_duration,
+                error=None,
+            )
+            print(f"[SUCCESS] Executed in {execution_duration:.2f}s")
+            print(f"[RESULTS] {result_df.shape[0]} rows x {result_df.shape[1]} cols")
 
-            print(f"[ERROR] {error_msg}")
+            if state["enable_debug"] and not result_df.empty:
+                print("\n" + result_df.head(5).to_markdown(index=False))
 
     # Remove processed indices from remaining
     for idx in processed_indices:
